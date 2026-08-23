@@ -1,5 +1,8 @@
 #include "game/Ledger.h"
 
+// Lorkhan server-shell phase 1: passive telemetry tap (SERVER-SHELL-PLAN.md).
+#include "net/ShellBridge.h"
+
 #include <cstring>
 #include <deque>
 #include <mutex>
@@ -83,6 +86,8 @@ namespace FUI::Ledger
         e.slot = a_slot;
         g_open.push_back(std::move(e));
         ++g_submitted;
+        // Lorkhan phase 1: copy of the request as written, nothing decided here.
+        FUI::ShellBridge::NoteSubmit(a_form, a_delta, a_who ? a_who : "?", a_uid, a_sig, a_slot);
     }
 
     const char* Confirm(std::uint32_t a_form, std::int32_t a_delta)

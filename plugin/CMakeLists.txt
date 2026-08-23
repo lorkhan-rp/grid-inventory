@@ -64,6 +64,8 @@ set(SOURCES
     src/api/GridInventoryAPI.h
     src/api/HostApi.h
     src/api/HostApi.cpp
+    src/net/ShellBridge.h
+    src/net/ShellBridge.cpp
     src/game/Inv3D.h
     src/game/GoldCoins.h
     src/game/GoldCoins.cpp

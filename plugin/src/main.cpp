@@ -3,6 +3,7 @@
 #include "game/Census.h"
 #include "game/Costume.h"
 #include "game/DeltaWatch.h"
+#include "net/ShellBridge.h"
 #include "game/Ledger.h"
 #include "game/WornLedger.h"
 #include "game/DualRing.h"
@@ -462,6 +463,15 @@ namespace
             // of our own would be delivered in an order we do not control.
             // Observation only; returns immediately unless "!delta = 1".
             FUI::DeltaWatch::OnContainer(a_event, req);
+            // Lorkhan phase 1: an unmatched player-side delta is a genuine outside
+            // change (console, script, or a SkyMP server resync -- THE number the
+            // shell design needs). POD only on this thread; the bridge marshals.
+            if (!req && (a_event->newContainer == 0x14 || a_event->oldContainer == 0x14)) {
+                const std::int32_t outsideSigned = a_event->newContainer == 0x14
+                                                       ? a_event->itemCount
+                                                       : -a_event->itemCount;
+                FUI::ShellBridge::NoteOutsideDelta(a_event->baseObj, outsideSigned);
+            }
             // W2: any change touching the player's inventory can flip the
             // capacity state (shop buys, scripted AddItem, drops, sells)
             if (a_event->newContainer == 0x14 || a_event->oldContainer == 0x14) {
@@ -2194,6 +2204,7 @@ namespace
         case SKSE::MessagingInterface::kDataLoaded:
             Setup();
             FUI::GoldCoins::InitForms();   // G1: resolve Grid Inventory.esp
+            FUI::ShellBridge::Init();      // Lorkhan phase 1: telemetry hello
             // ★B3-a: close the loop the ledger opened. Registered once, here,
             // where the forms are already resolved.
             // ★A confirmation commits ITS OWN cell and no other: the slot key
@@ -2201,9 +2212,11 @@ namespace
             // never pop a pending store's key -- the count-based version did
             // exactly that whenever two paths moved the same form.
             FUI::Ledger::SetOnExpire([](const FUI::Ledger::Expired& a_e) {
+                FUI::ShellBridge::NoteExpired(a_e);  // Lorkhan phase 1 (passive)
                 FUI::Grid::OnRequestExpired(a_e.form, a_e.delta, a_e.who, a_e.slot);
             });
             FUI::Ledger::SetOnConfirm([](const FUI::Ledger::Expired& a_e) {
+                FUI::ShellBridge::NoteLanded(a_e);  // Lorkhan phase 1 (passive)
                 if (a_e.delta < 0) FUI::Grid::CommitSlotDrop(a_e.form, a_e.slot);
                 // ★A confirmed consume releases its suppression entry NOW --
                 // see ReleaseAppliedPendingEquip. Without this the entry
