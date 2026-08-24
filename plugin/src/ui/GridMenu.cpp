@@ -89,6 +89,12 @@ namespace
 
 namespace FUI
 {
+    // Lorkhan : voir GridMenu.h. ON par defaut dans ce fork (multijoueur).
+    static bool g_noPause = true;
+
+    void GridInventoryMenu::SetNoPause(bool a_on) { g_noPause = a_on; }
+    bool GridInventoryMenu::NoPauseEnabled() { return g_noPause; }
+
     void GridInventoryMenu::FlushInputState()
     {
         if (ImGui::GetCurrentContext() == nullptr) return;
@@ -127,7 +133,14 @@ namespace FUI
         // kPausesGame stops the PlayerCharacter::Update hook, so pre-render
         // parking must run here: menus still advance every frame while the
         // game is paused, BEFORE the frame renders.
-        UIRoot::Tick();
+        // ★Lorkhan (mode sans pause) : quand le monde tourne, le hook
+        // PlayerCharacter::Update pilote deja Tick a chaque frame — l'appeler
+        // aussi ici le ferait tourner DEUX fois par frame (files d'icones et
+        // d'equipement traitees en double). On ne prend le relais que lorsque
+        // le jeu est reellement fige.
+        if (auto* pauseUi = RE::UI::GetSingleton(); !pauseUi || pauseUi->GameIsPaused()) {
+            UIRoot::Tick();
+        }
         // ★Frames, not wall clock (Ledger.h): AdvanceMovie keeps running while
         // the menu pauses the game, which is exactly the clock we want.
         FUI::Ledger::Tick();
@@ -155,6 +168,26 @@ namespace FUI
             }
         }
 
+        // ★Lorkhan (mode sans pause) : Inventory3DManager::Render() ne dessine
+        // RIEN tant que le jeu tourne (note de Modex : "show3DPreview requires
+        // pauseGame"). Plutot que de figer tout le temps qu'un sac est ouvert,
+        // on pose la pause moteur le temps du SEUL rendu 3D de cette frame et
+        // on la retire aussitot : le monde perd au pire un frame quand une
+        // capture d'icone a lieu (rares one-shots, le gros du pack est
+        // pre-capture), et rien du tout le reste du temps. Compteur restaure
+        // par le destructeur, meme si un rendu leve.
+        struct PausePulse
+        {
+            RE::UI* ui = nullptr;
+            explicit PausePulse(bool a_want)
+            {
+                if (!a_want) return;
+                ui = RE::UI::GetSingleton();
+                if (ui) ui->numPausesGame += 1;
+            }
+            ~PausePulse() { if (ui && ui->numPausesGame > 0) ui->numPausesGame -= 1; }
+        } pulse(g_noPause);
+
         IconCache::GetSingleton()->PreRender();   // icon queue owns the request while busy
         ItemPreview::GetSingleton()->Render();
         IconCache::GetSingleton()->PostRender();  // harvest this frame's capture
@@ -172,6 +205,7 @@ namespace FUI
     // The custom descriptor sounds stay audible through the hide transition
     // (only the UI-category vanilla path was swallowed).
     static bool g_closeSfxPlayed = false;
+
 
     void GridInventoryMenu::MarkCloseSfxPlayed() { g_closeSfxPlayed = true; }
 
@@ -313,7 +347,16 @@ namespace FUI
         // both are on" — Inventory3DManager::Render() draws nothing while the
         // game runs. Realtime policy (PLAN_B A5) is revisited at B-2 via the
         // icon cache (captures become rare one-shots).
-        menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
+        // ★Lorkhan : kPausesGame SEULEMENT en mode solo. kDisablePauseMenu
+        // reste pose dans les deux cas (il empeche le menu ESC de s'ouvrir
+        // par-dessus le notre, ce qui n'a rien a voir avec le figeage du
+        // monde). Le rendu 3D des objets, lui, est couvert par l'impulsion
+        // de pause d'un frame dans PostDisplay.
+        if (g_noPause) {
+            menu->menuFlags.set(Flags::kDisablePauseMenu);
+        } else {
+            menu->menuFlags.set(Flags::kPausesGame, Flags::kDisablePauseMenu);
+        }
 
         // kInventory, NOT kMenuMode/kItemMenu: this is the vanilla
         // InventoryMenu's own context — its controlmap section TRANSLATES the

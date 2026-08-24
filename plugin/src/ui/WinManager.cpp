@@ -1,5 +1,6 @@
 ﻿#include "ui/IconCache.h"
 #include "ui/Grid.h"
+#include "ui/GridMenu.h"
 #include "ui/Equip.h"
 #include "ui/Lang.h"
 #include "ui/LootBarter.h"
@@ -365,6 +366,12 @@ namespace FUI
             // bisecting reports. See Ledger.h.
             if (key == "!ledger") {
                 Ledger::SetEnabled(rest == "1" || rest == "true");
+                continue;
+            }
+            // Lorkhan : mode sans pause du menu (ON par defaut dans ce fork,
+            // cf. GridMenu.h). Cette ligne est l'echappatoire solo.
+            if (key == "!nopause") {
+                GridInventoryMenu::SetNoPause(rest == "1" || rest == "true");
                 continue;
             }
             // Test switch, not a setting: see Ledger::SimRefuse.
@@ -823,6 +830,8 @@ namespace FUI
         // an ordinary install still carries no line.
         if (!Census::Enabled())    out << "!census = 0\n";
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
+        // Lorkhan : ecrit UNIQUEMENT quand on rend la pause (defaut = sans).
+        if (!GridInventoryMenu::NoPauseEnabled()) out << "!nopause = 0\n";
         if (DualRing::SlotOverride() >= 0) {
             out << "!ring2slot = " << DualRing::SlotOverride() << "\n";
         }

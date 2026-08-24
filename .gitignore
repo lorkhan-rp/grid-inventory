@@ -39,3 +39,7 @@
 # --- repo files ---
 !/.gitignore
 !/README.md
+
+# --- fork Lorkhan : traduction francaise livree avec notre addon ---
+!/dist/
+!/dist/**

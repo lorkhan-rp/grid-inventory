@@ -23,6 +23,14 @@ namespace FUI
         // this suppresses OnHide's fallback so the sound doesn't double up.
         static void MarkCloseSfxPlayed();
 
+        // Lorkhan (serveur RP) : mode SANS PAUSE. Le monde et les autres
+        // joueurs continuent d'exister pendant qu'on est dans son sac — un
+        // menu qui fige l'ecran local n'a pas de sens en multijoueur. Defaut
+        // ON dans ce fork ; "!nopause = 0" dans GridInventory_ui.ini rend le
+        // comportement solo d'origine (utile pour bisecter un rapport).
+        static void SetNoPause(bool a_on);
+        [[nodiscard]] static bool NoPauseEnabled();
+
         void PostDisplay() override;
         void AdvanceMovie(float a_interval, std::uint32_t a_currentTime) override;
         RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage& a_message) override;
