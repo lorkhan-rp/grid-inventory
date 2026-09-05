@@ -4224,6 +4224,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         return true;
     }
 
+    const FUI::Shape* HeldShape()
+    {
+        return g_held ? &g_held->mask : nullptr;
+    }
+
     namespace
     {
         // ★Ring session: the cursor's exits, by ORIGIN (user spec). A carry

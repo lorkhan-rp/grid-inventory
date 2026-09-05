@@ -175,6 +175,15 @@ namespace FUI::Grid
     // grid's drop ghost / drop-cell math. False when nothing is carried.
     bool HeldFootprint(int& a_w, int& a_h, float& a_offX, float& a_offY);
 
+    // ★GI71b: the carried FOOTPRINT, not just its bounding box. HeldFootprint
+    // hands out w/h, which is all a rectangle ever needed -- and it is why the
+    // partner board's drop ghost stayed a rectangle after its tiles learned to
+    // be L-shaped: the shape was there, the accessor simply could not say it.
+    // The player's own grid has always drawn its ghost from the mask; this is
+    // how the other board reads the same thing.
+    // Null when nothing is carried. Valid only for the current frame.
+    [[nodiscard]] const FUI::Shape* HeldShape();
+
     // v9.2: start carrying an item that is NOT in the grid (equipment doll
     // pickup — the unequip runs deferred, the carry starts immediately).
     // GI25: a_uid/a_sig identify the sub-stack being lifted (the doll's pickup

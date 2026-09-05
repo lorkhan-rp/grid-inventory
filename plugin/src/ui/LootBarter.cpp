@@ -3497,6 +3497,16 @@ namespace
                     const bool ok = fits(gc, gr, hw, hh);
                     const ImU32 ghost = ok ? IM_COL32(90, 170, 90, 90)
                                            : IM_COL32(190, 60, 60, 110);
+                    // ★★GI71b: A BOX HERE, ON PURPOSE, and it is not an
+                    // oversight left over from the partner board's ghost.
+                    //
+                    // A BAG still PACKS by bounding box -- its fits/mark walk
+                    // w x h, so a T dropped in one reserves the whole 3x2 it
+                    // sits in. Drawing the notched outline would promise a shape
+                    // the bag will not honour, and a ghost that disagrees with
+                    // what happens next is worse than a coarse one. When bag
+                    // packing learns masks, this becomes the same loop the
+                    // partner board uses and not before.
                     const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
                     dl->AddRectFilled(g0,
                         ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
@@ -6057,22 +6067,59 @@ namespace
                     int gr = static_cast<int>(std::lround((m.y - base.y - oy) / cell));
                     gc = (std::max)(0, (std::min)(Grid::kCols - hw, gc));
                     gr = (std::max)(0, (std::min)(rows - hh, gr));
+                    // ★★GI71b: THE GHOST IS THE FOOTPRINT. Both halves of it.
+                    //
+                    // The tiles on this board learned to be L-shaped and the
+                    // preview did not, so a shaped item was still announced as
+                    // the rectangle it sits in -- reported straight after the
+                    // shapes landed. The player's own grid has drawn its ghost
+                    // cell by cell from the mask since it was written; this is
+                    // the same loop.
+                    //
+                    // ★And the blocker test with it, or the two would disagree:
+                    // a box-vs-box hit turns the ghost red over a notch neither
+                    // shape uses, and the drop that follows would go through
+                    // green. HeldShape is null only when nothing is carried,
+                    // which the caller already ruled out; a shapeless carry
+                    // falls back to the full box exactly as before.
+                    const auto* hs = Grid::HeldShape();
+                    const auto heldSolid = [&](int a_x, int a_y) {
+                        return (!hs || hs->rows.empty()) ? true : hs->At(a_x, a_y);
+                    };
                     int blockers = 0;
                     for (const auto& pc : cells) {
                         if (pc.col < 0 ||
                             HeldCell(pc.spotKey)) {
                             continue;
                         }
-                        if (gc < pc.col + pc.w && gc + hw > pc.col &&
-                            gr < pc.row + pc.h && gr + hh > pc.row) {
-                            ++blockers;
+                        bool hit = false;
+                        for (int y = 0; y < hh && !hit; ++y) {
+                            for (int x = 0; x < hw; ++x) {
+                                if (!heldSolid(x, y)) continue;
+                                const int cc = gc + x, rr = gr + y;
+                                if (cc < pc.col || cc >= pc.col + pc.w ||
+                                    rr < pc.row || rr >= pc.row + pc.h) {
+                                    continue;
+                                }
+                                if (pc.Solid(cc - pc.col, rr - pc.row)) {
+                                    hit = true;
+                                    break;
+                                }
+                            }
                         }
+                        if (hit) ++blockers;
                     }
                     const ImU32 ghost = blockers == 0 ? IM_COL32(90, 170, 90, 90)
                                                       : IM_COL32(190, 60, 60, 110);
-                    const ImVec2 g0(base.x + gc * cell, base.y + gr * cell);
-                    dl->AddRectFilled(g0,
-                        ImVec2(g0.x + hw * cell, g0.y + hh * cell), ghost);
+                    for (int y = 0; y < hh; ++y) {
+                        for (int x = 0; x < hw; ++x) {
+                            if (!heldSolid(x, y)) continue;
+                            const ImVec2 g0(base.x + (gc + x) * cell,
+                                            base.y + (gr + y) * cell);
+                            dl->AddRectFilled(g0,
+                                ImVec2(g0.x + cell, g0.y + cell), ghost);
+                        }
+                    }
                 }
             }
 
@@ -6629,23 +6676,27 @@ namespace
             // a rectangle; now that a T can sit here, its two empty corners
             // would report a blocker that is not there and the drop would read
             // as a swap (or, with a second neighbour, as invalid).
-            // ★The carried side stays a box on purpose. HeldFootprint hands out
-            // w/h and no mask, and over-reporting a blocker is the safe half of
-            // this test -- it refuses a legal drop, where the other way round
-            // would allow an overlapping one.
+            // ★GI71b: and the CARRIED side by its footprint too, now that
+            // HeldShape can say what it is. This has to match the ghost drawn
+            // in DrawPartnerCells cell for cell -- the comment above that ghost
+            // says preview and result cannot disagree, and they only cannot if
+            // both ask the same question. A carry with no shape falls back to
+            // its full box, which is what every carry used to be.
+            const auto* hs = Grid::HeldShape();
             const auto overlaps = [&] {
                 if (!(c < pc.col + pc.w && c + hw > pc.col &&
                       r < pc.row + pc.h && r + hh > pc.row)) {
                     return false;
                 }
-                if (pc.mask.rows.empty()) return true;
-                for (int y = 0; y < pc.h; ++y) {
-                    for (int x = 0; x < pc.w; ++x) {
-                        if (!pc.Solid(x, y)) continue;
-                        const int cc = pc.col + x, rr = pc.row + y;
-                        if (cc >= c && cc < c + hw && rr >= r && rr < r + hh) {
-                            return true;
+                for (int y = 0; y < hh; ++y) {
+                    for (int x = 0; x < hw; ++x) {
+                        if (hs && !hs->rows.empty() && !hs->At(x, y)) continue;
+                        const int cc = c + x, rr = r + y;
+                        if (cc < pc.col || cc >= pc.col + pc.w ||
+                            rr < pc.row || rr >= pc.row + pc.h) {
+                            continue;
                         }
+                        if (pc.Solid(cc - pc.col, rr - pc.row)) return true;
                     }
                 }
                 return false;
