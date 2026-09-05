@@ -4519,10 +4519,29 @@ namespace
             // angle can never disagree -- every placement test on this side reads
             // w/h directly, and a stale pair would place the cell wrong.
             int           rot = 0;
+            // ★★GI71: THE FOOTPRINT, so a container can hold a T the same shape
+            // the player's board does. Derived from the def every frame rather
+            // than stored on ContCell: the shape follows the def, so persisting
+            // it would only give a saved layout a way to disagree with items.ini
+            // after an edit. w/h stay the mask's bounding box.
+            FUI::Shape mask;
             void SetRot(int a_rot)
             {
+                // ★Turn the MASK by the same delta, in the same call that swaps
+                // w/h. The note above about w/h and the angle never disagreeing
+                // now covers three things instead of two, and the only way to
+                // keep that true is to move them together.
+                const int d = (a_rot - rot) & 3;
+                if (d != 0) mask = FUI::RotateShape(mask, d);
                 if (((rot ^ a_rot) & 1) != 0) std::swap(w, h);
                 rot = a_rot & 3;
+            }
+            // Bounds-safe: a cell built before its mask was filled reads as a
+            // solid rectangle, which is what every such cell used to be.
+            [[nodiscard]] bool Solid(int a_x, int a_y) const
+            {
+                if (mask.rows.empty()) return true;
+                return mask.At(a_x, a_y);
             }
 
             // ★THE WHOLE IDENTITY, so a caller cannot take half of it by
@@ -5088,6 +5107,10 @@ namespace
                 pc.ord = ordOf[PoolOf(c)]++;
                 pc.col = c.col;
                 pc.row = c.row;
+                // ★GI71: BEFORE SetRot, and unrotated. SetRot turns the mask by
+                // the delta, so handing it an already-turned shape would turn it
+                // twice. Clamped to the partner board's own width.
+                pc.mask = FUI::ShapeOf(def, Grid::kCols);
                 pc.SetRot(c.rot);
                 // GI42: the lock's resolution must MATCH the naming resolution.
                 // Locking only the worn cell while a spare cell could still pull
@@ -5213,19 +5236,35 @@ namespace
             auto ensureRow = [&](int r) {
                 while (static_cast<int>(occ.size()) <= r) occ.emplace_back(cols, false);
             };
-            auto fits = [&](int c, int r, int w, int h) {
-                if (c < 0 || r < 0 || c + w > cols) return false;
-                for (int y = 0; y < h; ++y) {
+            // ★★GI71: THE FOOTPRINT DECIDES, NOT THE BOUNDING BOX.
+            //
+            // These two walked the w x h rectangle, which is why a container
+            // could not hold a polyomino: a T claimed the whole 3x2 box it sits
+            // in, so its two empty corners stayed reserved and no neighbour
+            // could use them. The player board has always walked the mask; this
+            // is the same walk.
+            //
+            // ★A solid rectangle has every cell set, so both reduce exactly to
+            // what they replaced -- the 99% case is untouched by construction
+            // rather than by luck. `Solid` also answers true for a cell whose
+            // mask was never filled, so nothing regresses on a path that has not
+            // been taught about shapes yet.
+            auto fits = [&](const PartnerCell& it, int c, int r) {
+                if (c < 0 || r < 0 || c + it.w > cols) return false;
+                for (int y = 0; y < it.h; ++y) {
                     ensureRow(r + y);
-                    for (int x = 0; x < w; ++x)
-                        if (occ[r + y][c + x]) return false;
+                    for (int x = 0; x < it.w; ++x) {
+                        if (it.Solid(x, y) && occ[r + y][c + x]) return false;
+                    }
                 }
                 return true;
             };
-            auto mark = [&](int c, int r, int w, int h) {
-                for (int y = 0; y < h; ++y) {
+            auto mark = [&](const PartnerCell& it, int c, int r) {
+                for (int y = 0; y < it.h; ++y) {
                     ensureRow(r + y);
-                    for (int x = 0; x < w; ++x) occ[r + y][c + x] = true;
+                    for (int x = 0; x < it.w; ++x) {
+                        if (it.Solid(x, y)) occ[r + y][c + x] = true;
+                    }
                 }
             };
 
@@ -5240,8 +5279,8 @@ namespace
             for (auto& it : cells) {
                 if (it.col < 0 || it.row < 0) continue;
                 const bool inCap = !companionBoard || it.row + it.h <= kCompanionRows;
-                if (inCap && fits(it.col, it.row, it.w, it.h)) {
-                    mark(it.col, it.row, it.w, it.h);
+                if (inCap && fits(it, it.col, it.row)) {
+                    mark(it, it.col, it.row);
                 } else {
                     it.col = -1;
                     it.row = -1;
@@ -5285,10 +5324,10 @@ namespace
                         }
                         for (int r = 0; r + it.h <= kCompanionRows && it.col < 0; ++r) {
                             for (int c = 0; c < cols; ++c) {
-                                if (!fits(c, r, it.w, it.h)) continue;
+                                if (!fits(it, c, r)) continue;
                                 it.col = c;
                                 it.row = r;
-                                mark(c, r, it.w, it.h);
+                                mark(it, c, r);
                                 break;
                             }
                         }
@@ -5331,10 +5370,10 @@ namespace
                 }
                 for (int r = companionBoard ? kCompanionRows : 0; it.col < 0; ++r) {
                     for (int c = 0; c < cols; ++c) {
-                        if (fits(c, r, it.w, it.h)) {
+                        if (fits(it, c, r)) {
                             it.col = c;
                             it.row = r;
-                            mark(c, r, it.w, it.h);
+                            mark(it, c, r);
                             break;
                         }
                     }
@@ -5418,6 +5457,12 @@ namespace
                 if (HeldCell(it.spotKey)) continue;
                 for (int y = 0; y < it.h; ++y) {
                     for (int x = 0; x < it.w; ++x) {
+                        // ★GI71: a notch is not occupied ground. Shading the
+                        // bounding box would paint a T's two empty corners as
+                        // full and then a neighbour placed there -- which the
+                        // mask-aware placement now allows -- would sit on top of
+                        // ground belonging to nothing.
+                        if (!it.Solid(x, y)) continue;
                         const int cc = it.col + x, rr = it.row + y;
                         const ImVec2 c0(base.x + cc * cell, base.y + rr * cell);
                         const ImVec2 q0(c0.x + (cc > 0 ? in1 : in0),
@@ -5452,7 +5497,29 @@ namespace
                 // While carrying, SKIP the cell buttons — they'd swallow the drop
                 // click over an occupied cell (drag-to-store must reach the window
                 // hover test regardless of what's under the cursor).
-                if (!Grid::IsHolding()) {
+                // ★★GI71: A CLICK TARGET IS THE FOOTPRINT, NOT ITS BOX.
+                //
+                // The button below covers the whole w x h rect. That was exact
+                // while every partner tile WAS a rectangle, and stops being so
+                // the moment placement lets a neighbour sit in a T's notch: the
+                // T's box covers that neighbour, and ImGui hands the hover to
+                // whichever overlapping item was submitted last, so one of the
+                // two becomes unclickable depending on draw order.
+                //
+                // ★So the item simply does not offer a target on a square it
+                // does not own. Both cells still submit their own button when
+                // the cursor is over a square that IS theirs, and no two items
+                // can own the same square -- placement guarantees it -- so the
+                // right one answers whatever the order. A solid rectangle owns
+                // every square in its box and is unaffected.
+                bool ownsCursor = true;
+                if (!it.mask.rows.empty()) {
+                    const ImVec2 mp = ImGui::GetIO().MousePos;
+                    const int    mx = static_cast<int>(std::floor((mp.x - p0.x) / cell));
+                    const int    my = static_cast<int>(std::floor((mp.y - p0.y) / cell));
+                    ownsCursor = it.Solid(mx, my);
+                }
+                if (!Grid::IsHolding() && ownsCursor) {
                     char idbuf[16];
                     std::snprintf(idbuf, sizeof(idbuf), "##pc%zu", i);
                     ImGui::SetCursorScreenPos(p0);
@@ -5892,12 +5959,24 @@ namespace
                 // matters most for the socket mod -- the point is to SEE what a
                 // chest holds and decide whether to take it, so the badges have
                 // to be on the partner cell, not only on our own grid.
-                // The partner window draws plain rectangles (no polyomino mask),
-                // so the default full-rect shape is correct here.
+                // ★GI71: and it carries the FOOTPRINT now, so a socket well lands
+                // on a cell the item actually owns. The default stays a full
+                // rectangle, which is still exactly right for every tile that
+                // has no shape of its own.
                 {
                     Badges::TileShape shape;
                     shape.w = it.w;
                     shape.h = it.h;
+                    if (!it.mask.rows.empty()) {
+                        shape.cells = 0;
+                        for (int my = 0; my < it.h && my < 8; ++my) {
+                            for (int mx = 0; mx < it.w && mx < 8; ++mx) {
+                                if (it.Solid(mx, my)) {
+                                    shape.cells |= 1ull << (my * 8 + mx);
+                                }
+                            }
+                        }
+                    }
                     auto       pr = g_partner.get();
                     // ★IsMouseHoveringRect is geometry only -- it clips, but it
                     // never asks who is on top, so a badge under another window
@@ -6455,18 +6534,29 @@ namespace
                 const int rr = c.row + y;
                 if (rr < 0 || rr >= kCompanionRows) continue;
                 for (int x = 0; x < c.w; ++x) {
+                    // ★GI71: an occupant reserves its FOOTPRINT, matching what
+                    // PlacePartnerCells actually marks. Marking the bounding box
+                    // here would hide a T's two free corners from this gate and
+                    // answer "the pack is full" with a hole in plain sight --
+                    // the same wrong answer the note below was written about.
+                    if (!c.Solid(x, y)) continue;
                     const int cc = c.col + x;
                     if (cc < 0 || cc >= cols) continue;
                     occ[static_cast<std::size_t>(rr) * cols + cc] = 1;
                 }
             }
         }
-        const auto fits = [&](int a_w, int a_h) {
-            for (int r = 0; r + a_h <= kCompanionRows; ++r) {
-                for (int c = 0; c + a_w <= cols; ++c) {
+        // ★GI71: and the INCOMING item is tested by its footprint too, so a
+        // notched shape is not refused for squares it would never use. Built
+        // once, turned to the angle asked for, exactly as placement will.
+        const auto probe = FUI::ShapeOf(d, cols, a_rot);
+        const auto fits = [&](const FUI::Shape& a_sh) {
+            for (int r = 0; r + a_sh.h <= kCompanionRows; ++r) {
+                for (int c = 0; c + a_sh.w <= cols; ++c) {
                     bool free = true;
-                    for (int y = 0; y < a_h && free; ++y) {
-                        for (int x = 0; x < a_w; ++x) {
+                    for (int y = 0; y < a_sh.h && free; ++y) {
+                        for (int x = 0; x < a_sh.w; ++x) {
+                            if (!a_sh.At(x, y)) continue;
                             if (occ[static_cast<std::size_t>(r + y) * cols + c + x]) {
                                 free = false;
                                 break;
@@ -6478,7 +6568,7 @@ namespace
             }
             return false;
         };
-        if (fits(w, h)) return true;
+        if (fits(probe)) return true;
         // ★★★AND THE OTHER WAY ROUND, which is the promise the player board
         // already makes. Its capacity gate green-lights a pickup by trying BOTH
         // orientations, and its landing turns the tile to honour that (see
@@ -6489,7 +6579,10 @@ namespace
         //
         // ★A square footprint has no other way round; asking twice would just
         // cost the same walk again.
-        if (w != h) return fits(h, w);
+        // ★GI71: a quarter TURN, not a transpose. Swapping w and h is the same
+        // thing only for a rectangle -- transposing an L mirrors it, and the
+        // gate would then green-light a shape placement cannot produce.
+        if (w != h) return fits(FUI::RotateShape(probe, 1));
         return false;
     }
 
@@ -6531,8 +6624,33 @@ namespace
         int blockers = 0;
         for (const auto& pc : g_lastCells) {
             if (pc.col < 0 || HeldCell(pc.spotKey)) continue;
-            if (c < pc.col + pc.w && c + hw > pc.col &&
-                r < pc.row + pc.h && r + hh > pc.row) {
+            // ★GI71: the OCCUPANT is asked by its footprint, the carried item
+            // still by its box. Box-vs-box was exact while every shelf tile was
+            // a rectangle; now that a T can sit here, its two empty corners
+            // would report a blocker that is not there and the drop would read
+            // as a swap (or, with a second neighbour, as invalid).
+            // ★The carried side stays a box on purpose. HeldFootprint hands out
+            // w/h and no mask, and over-reporting a blocker is the safe half of
+            // this test -- it refuses a legal drop, where the other way round
+            // would allow an overlapping one.
+            const auto overlaps = [&] {
+                if (!(c < pc.col + pc.w && c + hw > pc.col &&
+                      r < pc.row + pc.h && r + hh > pc.row)) {
+                    return false;
+                }
+                if (pc.mask.rows.empty()) return true;
+                for (int y = 0; y < pc.h; ++y) {
+                    for (int x = 0; x < pc.w; ++x) {
+                        if (!pc.Solid(x, y)) continue;
+                        const int cc = pc.col + x, rr = pc.row + y;
+                        if (cc >= c && cc < c + hw && rr >= r && rr < r + hh) {
+                            return true;
+                        }
+                    }
+                }
+                return false;
+            };
+            if (overlaps()) {
                 if (++blockers == 1) {
                     d.occ = pc.obj;
                     d.occCount = pc.count;

@@ -50,12 +50,12 @@ namespace FUI::Grid
     {
         constexpr const char* kLayoutPath = "Data/SKSE/Plugins/GridInventory_layout.ini";
 
-        struct Mask
-        {
-            std::vector<std::vector<bool>> rows;
-            int w = 1;
-            int h = 1;
-        };
+        // ★GI71: the footprint moved to ItemDef.h so the partner board can build
+        // one too (it could resolve a def but not a shape, which is why a
+        // container laid every tile out as a rectangle). Same type, same
+        // arithmetic -- this name stays because the file says `mask` in about
+        // sixty places and renaming them would bury the change that matters.
+        using Mask = FUI::Shape;
 
         struct Item
         {
@@ -2226,29 +2226,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
 
         // ---- placement (JS maskOf / placeItems 1:1) ----
 
+        // ★GI71: the body of these three now lives in ItemDef.h, next to the def
+        // they read, so LootBarter can build the same footprint for a container
+        // or a merchant. The clamp is the only grid-specific part and is the one
+        // thing passed in -- a partner board has its own width.
         Mask MaskOf(const GridDef& a_def)
         {
-            Mask m;
-            if (!a_def.shape.empty()) {
-                std::istringstream ss(a_def.shape);
-                std::string tok;
-                int w = 1;
-                while (std::getline(ss, tok, '|')) {
-                    std::vector<bool> row;
-                    for (char c : tok) row.push_back(c == '1');
-                    w = (std::max)(w, static_cast<int>(row.size()));
-                    m.rows.push_back(std::move(row));
-                }
-                if (m.rows.empty()) m.rows.push_back({ true });
-                for (auto& r : m.rows) r.resize(w, false);
-                m.w = (std::min)(w, kCols);
-                m.h = static_cast<int>(m.rows.size());
-                return m;
-            }
-            m.w = (std::min)(kCols, (std::max)(1, a_def.w));
-            m.h = (std::max)(1, a_def.h);
-            m.rows.assign(m.h, std::vector<bool>(m.w, true));
-            return m;
+            return FUI::ShapeOf(a_def, kCols);
         }
 
         // GI62: the footprint turned a_rot quarter-turns CLOCKWISE (0..3).
@@ -2258,20 +2242,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         // every one of those sites instead of a special case in each.
         [[nodiscard]] Mask RotateMask(const Mask& a_mask, int a_rot)
         {
-            Mask m = a_mask;
-            for (int i = 0; i < (a_rot & 3); ++i) {
-                Mask r;
-                r.w = m.h;
-                r.h = m.w;
-                r.rows.assign(r.h, std::vector<bool>(r.w, false));
-                for (int y = 0; y < m.h; ++y) {
-                    for (int x = 0; x < m.w; ++x) {
-                        if (m.rows[y][x]) r.rows[x][m.h - 1 - y] = true;
-                    }
-                }
-                m = std::move(r);
-            }
-            return m;
+            return FUI::RotateShape(a_mask, a_rot);
         }
 
         // A footprint's def + rotation in one call (the pairing is always this).
