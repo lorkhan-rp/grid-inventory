@@ -2803,10 +2803,24 @@ namespace FUI
             // DIAGNOSTIC: which gate starved? (stamp = captures ran at all,
             // model/rot = scene state, content probe logs separately below)
             auto* dmdl = pv->FindCurrentModel();
+            // ★★"no model" WAS PRINTED BESIDE model=true radius=25.4 -- i.e. the
+            // label said the opposite of the evidence on its own line. It was
+            // never a verdict about the model at all, only the load flag
+            // negated. Three states reach this point and they take three
+            // different fixes, so the log has to tell them apart:
+            //   still loading              -> the loader needs more time
+            //   model ready, capture empty -> it loaded fine and rendered
+            //                                nothing (sheer meshes with no body
+            //                                under them: measured 19 of these)
+            //   no model                   -> the load never landed
+            const char* state = loading ? "still loading"
+                : (dmdl && dmdl->worldBound.radius > 0.0f)
+                    ? "model ready, capture empty"
+                    : "no model";
             SKSE::log::warn(
                 "[ICONS] precache gates '{}': {} (model={} radius={:.1f} rot={} "
                 "park={} stamp={}->{} mesh='{}')",
-                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                m_pending.obj->GetName(), state,
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
                 pv->RotationApplied(), pv->ParkTicks(),
                 m_stampBefore, pv->GetCaptureStamp(), ModelPathOf(m_pending.obj));
@@ -2886,10 +2900,24 @@ namespace FUI
             // returned early); park < 2 means the rig had not settled. Without
             // them a timeout line said only "not ready" and every cause looked
             // identical.
+            // ★★"no model" WAS PRINTED BESIDE model=true radius=25.4 -- i.e. the
+            // label said the opposite of the evidence on its own line. It was
+            // never a verdict about the model at all, only the load flag
+            // negated. Three states reach this point and they take three
+            // different fixes, so the log has to tell them apart:
+            //   still loading              -> the loader needs more time
+            //   model ready, capture empty -> it loaded fine and rendered
+            //                                nothing (sheer meshes with no body
+            //                                under them: measured 19 of these)
+            //   no model                   -> the load never landed
+            const char* state = loading ? "still loading"
+                : (dmdl && dmdl->worldBound.radius > 0.0f)
+                    ? "model ready, capture empty"
+                    : "no model";
             SKSE::log::info(
                 "[ICONS] '{}' {} (model={} radius={:.1f} rot={} park={} "
                 "stamp={}->{} loading={})",
-                m_pending.obj->GetName(), loading ? "deferred" : "no model",
+                m_pending.obj->GetName(), state,
                 dmdl != nullptr, dmdl ? dmdl->worldBound.radius : -1.0f,
                 pv->RotationApplied(), pv->ParkTicks(),
                 m_stampBefore, pv->GetCaptureStamp(), loading);
