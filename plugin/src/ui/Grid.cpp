@@ -11914,6 +11914,72 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             return g && g->value != 0.0f;
         }
 
+        // ★★GI72: ASK THE ENGINE FOR THE NUMBER RATHER THAN RECOMPUTE IT.
+        //
+        // Survival Mode gives armour a warmth rating and vanilla's item card
+        // prints it. Ours never did -- reported as "the tooltip for warmth on
+        // armour in survival mode does not show up", and it was a plain gap:
+        // nothing in this file had ever heard of warmth.
+        //
+        // ★★THE VALUE IS NOT IN ANY PLUGIN. TESObjectARMO carries armorRating
+        // and nothing else. The engine derives warmth from default-object
+        // KEYWORDS -- BGSDefaultObjectManager holds kSurvivalKeywordWarm/Cold
+        // and an Armor/Clothing pair per body area -- weighed by values that are
+        // not a record anywhere: Skyrim.esm, the four masters and the Survival
+        // ESL were all searched for a warmth setting and none of them has one.
+        // Reimplementing that from guesses would print a number that quietly
+        // disagrees with the game's own, which is worse than printing none.
+        //
+        // ★So the engine fills ITS card for us and the field is read off it.
+        // Whatever the game would show, this shows. ItemCard::SetItem has real
+        // Address Library ids in CommonLibSSE, and the constructor is inline --
+        // no unresolved symbol, unlike the ExtraDataList wall in LootBarter.
+        //
+        // Returns -1 for "no warmth to show", which is also the honest answer
+        // when Survival is off: vanilla prints nothing then either.
+        [[nodiscard]] int ArmourWarmth(RE::TESBoundObject* a_obj)
+        {
+            if (!a_obj || !a_obj->As<RE::TESObjectARMO>()) return -1;
+            if (!SurvivalModeOn()) return -1;
+            // ★Cached per FORM, because SetItem builds the WHOLE card -- name,
+            // effects, every string vanilla would draw -- and a tooltip asks
+            // once a frame for as long as it is up. Warmth is a property of the
+            // record and the mode; neither moves while a menu is open. The
+            // Survival gate above gates entry, so a cached value can only have
+            // been taken with the mode on.
+            static std::unordered_map<RE::FormID, int> s_warmth;
+            const auto id = a_obj->GetFormID();
+            if (const auto it = s_warmth.find(id); it != s_warmth.end()) return it->second;
+
+            int warmth = -1;
+            auto* ui = RE::UI::GetSingleton();
+            const auto hud = ui ? ui->GetMenu(RE::HUDMenu::MENU_NAME) : nullptr;
+            if (hud && hud->uiMovie) {
+                // A card needs a movie to build its object in; the HUD's is the
+                // one view that is loaded whenever a menu of ours is up.
+                RE::ItemCard          card(hud->uiMovie.get());
+                RE::InventoryEntryData e(a_obj, 1);
+                card.SetItem(&e, true);   // ignoreStolen: the mark is ours to draw
+                RE::GFxValue v;
+                if (card.obj.GetMember("warmth", &v) && v.IsNumber()) {
+                    warmth = static_cast<int>(std::lround(v.GetNumber()));
+                }
+                // ★SAY IT ONCE IF THE FIELD IS NOT THERE. The name comes from
+                // the item card's own field list in SkyrimSE.exe, so a miss
+                // means the card changed or the mode is not what we think --
+                // either way the tooltip would just be silently short, which is
+                // the failure mode that cost a release the last time.
+                static bool s_saidMissing = false;
+                if (warmth < 0 && !s_saidMissing) {
+                    s_saidMissing = true;
+                    SKSE::log::info("[TIP] survival is on but the item card has no "
+                                    "'warmth' field -- no warmth line will be drawn");
+                }
+            }
+            s_warmth[id] = warmth;
+            return warmth;
+        }
+
         // ★Both ends, in place. Leading/trailing space is what a dropped SURV
         // block leaves behind, and " " is not empty.
         void TrimInPlace(std::string& a_s)
@@ -12547,6 +12613,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             // the piece IS rather than as part of its measurement)
             ImGui::TextColored(Theme::TipVal(), "%s %d", Lang::T(Lang::Str::Armor), arm);
             diffText(arm);
+            // ★GI72: beside the rating, because that is where vanilla's card
+            // puts it and it is the same kind of measurement. Absent unless
+            // Survival Mode is on -- see ArmourWarmth.
+            if (const int warm = ArmourWarmth(a_obj); warm >= 0) {
+                ImGui::TextColored(Theme::TipVal(), "%s %d",
+                    Lang::T(Lang::Str::Warmth), warm);
+            }
         } else {
             RE::MagicItem* magic = a_obj->As<RE::AlchemyItem>();
             // ★An INGREDIENT only tells you what you have LEARNED (user report
