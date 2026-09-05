@@ -34,6 +34,42 @@ namespace FUI
             return false;
         }
 
+        // ★★A NON-NULL spModel IS NOT A FINISHED ONE, and LoadInFlight cannot
+        // tell the difference. It covers the hole it can see: an entry whose
+        // pointer has not arrived. A crash on 2026-09-03 (SE 1.5.97, Community
+        // Shaders + PGPatcher, a freshly generated PBR weapon) came through
+        // that guard INTACT -- every spModel was non-null, so the teardown was
+        // allowed, and End3D still read [rcx] with rcx = 0 one level deeper,
+        // inside the model. The engine hands out the node before every pass is
+        // attached to it and nothing in the entry says so.
+        //
+        // worldBound.radius is the one readiness signal already trusted
+        // elsewhere: the capture gates refuse a model until it is positive
+        // (see IconCache::CheckPendingGates). A zero radius here means the
+        // geometry has not landed, so the entry is still being built and End3D
+        // must not walk it yet.
+        //
+        // ★This is a GUARD, NOT A DIAGNOSIS. The crash log names no field, the
+        // reporter's runtime is not reproducible here, and the shipped exe is
+        // DRM-wrapped so the engine side cannot be read. It catches the
+        // half-built case IF the null is geometry-related; it proves nothing
+        // about the crash it was written for.
+        //
+        // ★Asked ONLY by the teardown, which is bounded: 300 reposts and then
+        // it skips End3D entirely and lets the next open/close pair it. Asking
+        // the same question in ResetScene would be unbounded -- a model that
+        // never gains a radius would stall the capture queue for the whole
+        // session with nothing to break the tie.
+        bool SceneModelIncomplete(RE::Inventory3DManager* a_mgr)
+        {
+            for (auto& lm : a_mgr->GetRuntimeData().loadedModels) {
+                if (lm.spModel && lm.spModel->worldBound.radius <= 0.0f) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
         // ★★1.0.5 — the capture rig, measured from the shipped scene:
         //   item (-12.4,-500,-26.25)   lamp (100,-350,100)   |d| = 226
         // Read as spherical about the item, with the camera at the origin
@@ -599,11 +635,16 @@ namespace FUI
         if (a_session != m_session || m_running) return;
         auto* mgr = RE::Inventory3DManager::GetSingleton();
         if (!mgr) return;
-        if (LoadInFlight(mgr)) {
+        // ★Two questions, not one: has a load yet to LAND (null spModel), and
+        // has one landed only PARTLY (spModel with no geometry). The second is
+        // the 2026-09-03 crash; see SceneModelIncomplete.
+        if (LoadInFlight(mgr) || SceneModelIncomplete(mgr)) {
             if (a_tries >= 300) {
                 // a load that never lands: leave the scene untouched (next
                 // open/close cycle pairs End3D) rather than risk the CTD
-                SKSE::log::warn("[PREVIEW] End: load stuck in flight, teardown skipped");
+                SKSE::log::warn("[PREVIEW] End: model never finished ({}), "
+                                "teardown skipped",
+                    LoadInFlight(mgr) ? "load stuck in flight" : "no geometry");
                 return;
             }
             SKSE::GetTaskInterface()->AddTask([this, a_session, a_tries]() {
@@ -614,7 +655,7 @@ namespace FUI
         Inv3D::Unload(mgr);
         // ★Same hole as ResetScene's, and the same answer: the guard above ran
         // before Unload, End3D walks the array Unload just touched.
-        if (LoadInFlight(mgr)) {
+        if (LoadInFlight(mgr) || SceneModelIncomplete(mgr)) {
             SKSE::GetTaskInterface()->AddTask([this, a_session, a_tries]() {
                 TeardownWhenIdle(a_session, a_tries + 1);
             });

@@ -1876,7 +1876,13 @@ namespace FUI
     // written under the old rules are no longer evidence of anything. v3: the
     // empty-world-model and missing-mesh cases are now caught before a capture
     // is ever armed, so anything the old gate recorded deserves a clean look.
-    static constexpr const char* kFailVer = "; ver 3";
+    // ★v4: a single timeout no longer condemns a key -- it takes two in one
+    // session (see CheckPendingGates). Every entry written under v3 was put
+    // there by ONE reading, and a reporter's PBR weapon proved that reading can
+    // be wrong: the same item captured in 121ms the moment the list was deleted
+    // by hand. So v3 lists are not evidence and are discarded, which is also
+    // what frees the items already condemned on machines we will never see.
+    static constexpr const char* kFailVer = "; ver 4";
 
     void IconCache::EnsureFailLoaded()
     {
@@ -1904,7 +1910,8 @@ namespace FUI
             std::error_code ec;
             std::filesystem::remove(kFailPath, ec);
             SKSE::log::info(
-                "[ICONS] fail list discarded ({} pre-GI68 keys) - they get another chance", n);
+                "[ICONS] fail list discarded ({} keys written under older rules) "
+                "- they get another chance", n);
             m_failed.clear();
             return;
         }
@@ -1931,6 +1938,29 @@ namespace FUI
         std::snprintf(buf, sizeof(buf), "%016llX\n",
             static_cast<unsigned long long>(a_key));
         out << buf;
+    }
+
+    // ★★GI69: THE FAIL LIST WAS THE ONLY SILENT EXIT IN THE WHOLE PIPELINE.
+    // Every other outcome leaves a line -- cached, skipped, deferred, mesh not
+    // found -- but a key on this list is dropped before anything is armed, so
+    // the player saw a flat tile and the log said nothing at all about it. That
+    // cost a release: a reporter's PBR sword had been condemned by one bad
+    // session, three logs went back and forth, and the answer was a file nobody
+    // could have known to look at.
+    //
+    // ★Once per key per session, and only from QueueCapture -- i.e. only for
+    // something actually on the screen. Prefetch sweeps thousands of records
+    // the player is not looking at, and saying this for each of them would bury
+    // the line it exists to make visible (the same mistake MeshMissingQuiet was
+    // written to undo).
+    void IconCache::NoteFailSkip(std::uint64_t a_key, RE::TESBoundObject* a_obj)
+    {
+        if (!m_failNoted.insert(a_key).second) return;
+        SKSE::log::info(
+            "[ICONS] '{}' is on the permanent fail list ({:016X}) -- skipped without "
+            "a capture. Delete Data/SKSE/Plugins/GridInventory_iconfail.txt to let "
+            "it try again.",
+            a_obj->GetName(), a_key);
     }
 
     // ---- GI68: the deferred list ------------------------------------------
@@ -2242,7 +2272,10 @@ namespace FUI
 
         if (m_icons.contains(key) || m_queued.contains(key)) return;
         EnsureFailLoaded();
-        if (m_failed.contains(key)) return;   // gave up on this one — stay out
+        if (m_failed.contains(key)) {         // gave up on this one — stay out
+            NoteFailSkip(key, a_obj);
+            return;
+        }
         if (m_pendingBusy && m_pending.key == key) return;
 
         // Session-persistent icons: load from disk before spending any
@@ -2594,7 +2627,7 @@ namespace FUI
         }
     }
 
-    void IconCache::GiveUpPending(const char* a_why)
+    void IconCache::GiveUpPending(const char* a_why, bool a_persist)
     {
         SKSE::log::warn("[ICONS] '{}' skipped ({})", m_pending.obj->GetName(), a_why);
 
@@ -2640,9 +2673,21 @@ namespace FUI
         // an inspect frame carries no cache key (0): its failures must never
         // reach the PERSISTED fail list
         if (m_pendingInspect) return;
-        // GI68: one verdict, no attempt counting. Reaching here means either the
-        // engine never even started a load (more time cannot help) or the retry
-        // pass already gave it ten seconds. Either way it is done.
+        // ★★GI69: AND NEITHER MUST A VERDICT THAT IS NOT ONE. This write used to
+        // be unconditional, so every caller got it -- including the two that
+        // announce "precache deferred", whose entire purpose is to say "this
+        // item WORKS, it is only slower than this pass can afford". They put
+        // the key on the deferred list and then, one line later, on the
+        // permanent one as well; and since QueueCapture tests m_failed first,
+        // the permanent verdict is the one that counted. GI68 built a
+        // recoverable path and this line quietly swallowed it.
+        //
+        // That is the most likely way a reporter's PBR weapon was condemned
+        // during a warm-up precache while loading perfectly well.
+        if (!a_persist) return;
+        // One verdict, no attempt counting HERE -- the strike count lives in
+        // CheckPendingGates, which decides whether to call this at all.
+        // Reaching this line means the item has been judged done.
         if (m_failed.insert(m_pending.key).second) {
             PersistFail(m_pending.key);
         }
@@ -2770,7 +2815,22 @@ namespace FUI
                     m_deferredObj[m_pending.key] = m_pending.obj;
                     PersistSlow(m_pending.key);
                 }
-                GiveUpPending("precache deferred");
+                GiveUpPending("precache deferred", false);   // NOT a permanent verdict
+                return GateResult::kAbandoned;
+            }
+            // ★GI69: the same two-strike rule the normal path takes below, and
+            // for the same reason -- this branch reached the persisted fail
+            // list from ONE "loading == false", which is the reading that was
+            // shown to be wrong. A precache entry is not re-queued by the draw
+            // loop, so its second strike waits for the retry pass or the next
+            // time the grid actually shows the item; deferring costs a line on
+            // a list the player can act on rather than a permanent verdict.
+            if (!m_retryPass && ++m_strikes[m_pending.key] < 2) {
+                if (m_deferred.insert(m_pending.key).second) {
+                    m_deferredObj[m_pending.key] = m_pending.obj;
+                    PersistSlow(m_pending.key);
+                }
+                GiveUpPending("precache deferred (first miss)", false);
                 return GateResult::kAbandoned;
             }
             m_deferred.erase(m_pending.key);
@@ -2843,7 +2903,39 @@ namespace FUI
                 m_pendingBusy = false;
                 return GateResult::kAbandoned;
             }
-            // retry pass ran out too, or the load never took at all
+            // ★★GI69: ONE READING MUST NOT CONDEMN AN ITEM FOR EVER.
+            //
+            // "loading == false" was read as "no task, no entry: more time
+            // changes nothing" and went STRAIGHT to the persisted fail list on
+            // the first try. Measured against a real report it is simply not
+            // that reliable: a PBR weapon (Community Shaders + PGPatcher) was
+            // condemned on one session and then captured in 121ms on the next,
+            // the moment the list was deleted by hand. A cold first load on a
+            // heavy setup can answer false at the instant we happen to ask.
+            //
+            // ★So it takes TWO. The first one defers, which also puts the key
+            // where the player can see it and press a button. Because the draw
+            // loop re-queues a visible tile as soon as the slot frees (m_queued
+            // was erased at the pop), the second attempt usually happens a few
+            // frames later against a now-warm loader -- which is how the item
+            // this was written for heals itself inside one session.
+            //
+            // ★And it has to be a COUNT, not the deferred list itself. That
+            // list persists, so reading membership would make the second strike
+            // arrive a whole session later and leave a hopeless item re-queuing
+            // at 20 frames a go for all of it. Two strikes bounds the spin at
+            // one extra window -- the same protection the old code bought, for
+            // one attempt more.
+            if (!m_retryPass && ++m_strikes[m_pending.key] < 2) {
+                if (m_deferred.insert(m_pending.key).second) {
+                    m_deferredObj[m_pending.key] = m_pending.obj;
+                    PersistSlow(m_pending.key);
+                }
+                pv->UnloadCurrent();
+                m_pendingBusy = false;
+                return GateResult::kAbandoned;
+            }
+            // the retry pass ran out too, or this key has now failed twice
             m_deferred.erase(m_pending.key);
             m_deferredObj.erase(m_pending.key);
             GiveUpPending("timeout");

@@ -345,7 +345,10 @@ namespace FUI
         // giveUp MECHANISM (callers own the policy of when): warn, unload,
         // release the pending slot, and escalate repeat offenders to the
         // PERSISTED permanent-fail list.
-        void GiveUpPending(const char* a_why);
+        // ★GI69: a_persist=false releases the slot and logs WITHOUT writing the
+        // key to the permanent fail list. The "deferred" verdicts need exactly
+        // that, and they did not have it -- see the note on the write itself.
+        void GiveUpPending(const char* a_why, bool a_persist = true);
 
         // ★The RESOLUTION lever is the model scale, not the box. The engine
         // renders the preview item at a size it chooses itself (~275px
@@ -459,9 +462,20 @@ namespace FUI
         std::unordered_map<std::uint64_t, RE::TESBoundObject*> m_deferredObj;
         bool                                   m_slowLoaded = false;
         bool                                   m_retryPass = false;   // generous window
+        // ★GI69: how many times THIS SESSION a key has run out of window with
+        // the engine reporting no load. One such reading is not evidence -- see
+        // the verdict in CheckPendingGates. Deliberately not persisted: the
+        // question it answers is "did this already fail while I watched", and a
+        // restart is exactly when it deserves a clean look.
+        std::unordered_map<std::uint64_t, int> m_strikes;
+        // ★GI69: keys whose fail-list skip has already been reported. The skip
+        // is silent by design (it happens before anything is armed), which left
+        // a flat tile with nothing in the log to explain it.
+        std::unordered_set<std::uint64_t>      m_failNoted;
 
         void EnsureFailLoaded();               // lazy read of the persisted list
         void PersistFail(std::uint64_t a_key); // append one permanently-failed key
+        void NoteFailSkip(std::uint64_t a_key, RE::TESBoundObject* a_obj);
         void EnsureSlowLoaded();
         void PersistSlow(std::uint64_t a_key);
         void RewriteSlow();                    // after a retry resolves entries
