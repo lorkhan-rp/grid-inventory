@@ -861,7 +861,21 @@ namespace FUI
 
     std::uint64_t IconCache::KeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
     {
-        return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | RotHash(a_def);
+        std::uint32_t rot = RotHash(a_def);
+        // ★★GI74: A SPELL'S KEY CHANGED WHEN ITS CAPTURE DID, on purpose.
+        //
+        // Every spell icon captured before this build was shot over a magenta
+        // backdrop, and additive glows sum the backdrop in -- so those records
+        // are the purple blobs that were reported, and they sit in the pak
+        // where the next lookup would serve them straight back. Salting the
+        // spell key orphans every one of them: the lookup misses, the spell is
+        // captured again over black, and the player never has to find the
+        // cache-reset button. The old records cost a few kilobytes until the
+        // next compaction and are never read. XOR with a constant is a
+        // bijection, so it manufactures no collisions.
+        constexpr std::uint32_t kSpellCaptureSalt = 0x5BE11A01u;   // "spell 1"
+        if (a_obj && a_obj->As<RE::SpellItem>()) rot ^= kSpellCaptureSalt;
+        return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | rot;
     }
 
     std::uint64_t IconCache::LegacyKeyFor(RE::TESBoundObject* a_obj, const IconDef& a_def) const
@@ -3047,6 +3061,11 @@ namespace FUI
         // in one body: its locals (crop rect, mapped rows, trim bounds) flow
         // straight through — splitting them would only add plumbing structs.
         auto giveUp = [&](const char* a_why) { GiveUpPending(a_why); };
+        // ★GI74: one answer for the content probe and the sprite pass both,
+        // taken here at function scope -- the gates above have just confirmed
+        // the pending object is live -- so neither stage re-derives it.
+        const bool spellCapture =
+            m_pending.obj && m_pending.obj->As<RE::SpellItem>() != nullptr;
 
         // Pixel rect of the FULL margin region (kSafetyMargin x inner box):
         // rotation diagonals that outgrow the inner box stay uncut; tiles
@@ -3283,7 +3302,18 @@ namespace FUI
                         // ★Read from dst, not the raw row: on a 10-bit surface
                         // those are different numbers, and alpha only means
                         // this after the unpack.
-                        const bool bg = dst[x * 4 + 3] == 0;
+                        // ★GI74: for a SPELL, content is BRIGHTNESS, not alpha.
+                        // The backdrop is black and the glow is additive, so
+                        // what the engine wrote into alpha is not coverage --
+                        // it may be 0 across the whole glow -- and reading it
+                        // would find nothing, time the capture out and defer
+                        // a spell that drew perfectly well. Black is the
+                        // backdrop; anything brighter than black is the spell.
+                        const bool bg = spellCapture
+                            ? ((std::max)({ static_cast<int>(dst[x * 4 + 0]),
+                                            static_cast<int>(dst[x * 4 + 1]),
+                                            static_cast<int>(dst[x * 4 + 2]) }) < 8)
+                            : dst[x * 4 + 3] == 0;
                         if (!bg) {
                             ++nonBg;
                             minX = (std::min)(minX, x);
@@ -3406,6 +3436,27 @@ namespace FUI
             std::memcpy(dst, src, static_cast<size_t>(trimW) * 4);
             for (int x = 0; x < trimW; ++x) {
                 auto* px = dst + x * 4;
+                // ★★GI74: A SPELL IS LIGHT, AND LIGHT'S ALPHA IS ITS BRIGHTNESS.
+                //
+                // The three rules below read the alpha the engine wrote and
+                // subtract magenta spill from blended pixels. Neither applies
+                // to an additive glow shot over BLACK: the shader's alpha is
+                // not coverage, and there is no backdrop colour in the pixel
+                // to subtract. What makes a glow visible is how bright it is
+                // -- over black that is the whole of it, exactly as the game's
+                // own magic menu shows it -- so the brightest channel becomes
+                // the alpha and the colour is kept as drawn. Black stays clear.
+                // Robust whichever way the shader wrote alpha, which is the
+                // point: that value could not be measured on the reporter's
+                // hardware and this does not need it to be.
+                if (spellCapture) {
+                    const int lum = (std::max)({ static_cast<int>(px[0]),
+                                                 static_cast<int>(px[1]),
+                                                 static_cast<int>(px[2]) });
+                    px[3] = static_cast<std::uint8_t>(lum);
+                    if (lum == 0) px[0] = px[1] = px[2] = 0;
+                    continue;
+                }
                 const int a = px[3];
                 if (a == 0) {
                     px[0] = px[1] = px[2] = 0;

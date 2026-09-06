@@ -1024,6 +1024,7 @@ namespace FUI
                 _stricmp(mdlNew->GetModel(), mdlCur->GetModel()) == 0 &&
                 FindCurrentModel() != nullptr) {
                 m_current = a_item;
+                m_currentIsSpell = a_item->As<RE::SpellItem>() != nullptr;   // GI74
                 m_def = a_def ? *a_def : IconDef{};
             }
         }
@@ -1074,6 +1075,7 @@ namespace FUI
                 SKSE::log::info("[PREVIEW] load '{}'", a_item->GetName());
             }
             m_current = a_item;
+            m_currentIsSpell = a_item->As<RE::SpellItem>() != nullptr;   // GI74
             m_def = a_def ? *a_def : IconDef{};
         } else if (a_def && (a_def->rx != m_def.rx || a_def->ry != m_def.ry ||
                              a_def->rz != m_def.rz || a_def->scale != m_def.scale)) {
@@ -1405,7 +1407,10 @@ namespace FUI
             if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
                     reinterpret_cast<void**>(&ctx1))) && ctx1) {
                 D3D11_RECT rect = { left, top, left + width, top + height };
-                ctx1->ClearView(rtv, kCaptureBg, &rect, 1);
+                // ★GI74: a spell is additive and sums the backdrop into itself,
+                // so its backdrop is black. See kCaptureBgSpell.
+                ctx1->ClearView(rtv, m_currentIsSpell ? kCaptureBgSpell : kCaptureBg,
+                                &rect, 1);
                 ctx1->Release();
             }
         }

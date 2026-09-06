@@ -56,6 +56,17 @@ namespace FUI
         // symmetric in R/B, that arithmetic never has to care whether the
         // surface is BGRA or RGBA.
         static constexpr float kCaptureBg[4] = { 1.0f, 0.0f, 1.0f, 0.0f };
+        // ★★GI74: BLACK for a SPELL. A spell's display object is a glow drawn
+        // with an ADDITIVE effect shader, and additive means dst + src: the
+        // backdrop's own colour is summed into every pixel the effect touches,
+        // and alpha -- 0 on the clear, whatever the shader writes after -- has
+        // no say in it. Over magenta that is a magenta glow with the spell
+        // faintly inside it, which is the reported ring of purple blobs
+        // (zhenguoce, screenshot). Over black, dst + src is just src: the glow
+        // the game itself draws in its magic menu. The min(R,B)-G spill
+        // arithmetic is for blended cloth and is not applied to spells at all
+        // -- see IconCache's sprite pass.
+        static constexpr float kCaptureBgSpell[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
 
         static ItemPreview* GetSingleton();
 
@@ -187,6 +198,11 @@ namespace FUI
         bool                m_running     = false;
         bool                m_requested   = false;
         RE::TESBoundObject* m_current     = nullptr;
+        // ★GI74: decided ONCE, where m_current is assigned and the object is
+        // known live -- never re-derived from the pointer at Render time. The
+        // engine's list can hold a dead form (see FindCurrentModel's note), and
+        // the backdrop choice must not be the thing that dereferences it.
+        bool                m_currentIsSpell = false;
         std::uint32_t       m_session     = 0;   // bumped by Begin(); guards deferred teardown
         // ★★GI73: is a Begin3D OUTSTANDING? A different question from m_running,
         // and the distance between the two is the bug: m_running is our own
