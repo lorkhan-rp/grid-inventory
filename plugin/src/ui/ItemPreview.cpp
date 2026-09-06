@@ -597,10 +597,40 @@ namespace FUI
         }
 
         if (auto* mgr = RE::Inventory3DManager::GetSingleton()) {
-            Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+            // ★★★GI73: ADOPT A SCENE THAT IS STILL UP, DO NOT STACK ANOTHER ONE.
+            //
+            // This called Begin3D whenever m_running was false -- and m_running
+            // is OUR state, cleared the instant the menu hides, while the engine
+            // scene lives until a teardown actually runs. TeardownWhenIdle
+            // returns WITHOUT End3D in two cases: the menu reopened (the session
+            // changed), or three hundred retries were exhausted. Its comment
+            // says the new session's own End() pairs the teardown -- but the new
+            // session had already added a second Begin3D by then, so the count
+            // came out two-to-one and one scene was left standing.
+            //
+            // ★An outstanding UI 3D scene draws the item and the player and not
+            // the world, which is exactly the report: "everything other than the
+            // player character will stop rendering, NPCs, objects, even the
+            // skybox", and it happened on the SECOND open (LO13OL75, 1.6.0).
+            // That reporter settled on another mod as the cause and may well be
+            // right about what stalled the first teardown -- but a stalled
+            // teardown is a thing this side has to survive, and it did not.
+            //
+            // ★m_scene3D tracks the only question that matters: is a Begin3D
+            // outstanding. When one is, the scene still up IS the scene this
+            // session wants, so it is adopted and the eventual End3D pairs the
+            // original call exactly.
+            if (m_scene3D) {
+                SKSE::log::warn("[PREVIEW] Begin3D SKIPPED -- the previous scene is "
+                                "still up (its teardown was deferred or refused). "
+                                "Adopting it so the pair stays 1:1.");
+            } else {
+                Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+                m_scene3D = true;
+                SKSE::log::info("[PREVIEW] Begin3D");
+            }
             m_running = true;
             ++m_session;   // cancels any teardown still deferred from the last close
-            SKSE::log::info("[PREVIEW] Begin3D");
         } else {
             SKSE::log::warn("[PREVIEW] Begin: Inventory3DManager null");
         }
@@ -662,9 +692,14 @@ namespace FUI
             return;
         }
         Inv3D::End3D(mgr);
-        if (a_tries > 0) {
-            SKSE::log::info("[PREVIEW] End3D (deferred {} tasks)", a_tries);
-        }
+        m_scene3D = false;   // GI73: the pair is closed; the next open opens a scene
+        // ★GI73: ALWAYS, not only when it was deferred. A successful teardown
+        // used to log nothing at all, so a log could show Begin3D twice and give
+        // no way to tell whether an End3D had run between them -- which is why
+        // the unbalanced pair could not be seen in any of the three reporter
+        // logs that went past it. One line per menu close buys the whole
+        // question back.
+        SKSE::log::info("[PREVIEW] End3D (deferred {} tasks)", a_tries);
     }
 
     RE::NiAVObject* ItemPreview::FindCurrentModel() const
@@ -809,8 +844,14 @@ namespace FUI
                             "-- End3D skipped");
             return false;
         }
+        // ★GI73: balanced IN PLACE -- one out, one straight back in -- so the
+        // outstanding-Begin3D count is unchanged and m_scene3D stays true. It is
+        // written rather than left implied because the two calls have to move
+        // together: dropping the Begin3D here without clearing the flag would
+        // leave Begin() adopting a scene that is no longer there.
         Inv3D::End3D(mgr);
         Inv3D::Begin3D(mgr, RE::INTERFACE_LIGHT_SCHEME::kInventory);
+        m_scene3D = true;
         m_current = nullptr;
         SKSE::log::info("[PREVIEW] scene reset (loadedModels was full)");
         return true;

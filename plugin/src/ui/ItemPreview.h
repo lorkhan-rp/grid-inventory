@@ -188,6 +188,14 @@ namespace FUI
         bool                m_requested   = false;
         RE::TESBoundObject* m_current     = nullptr;
         std::uint32_t       m_session     = 0;   // bumped by Begin(); guards deferred teardown
+        // ★★GI73: is a Begin3D OUTSTANDING? A different question from m_running,
+        // and the distance between the two is the bug: m_running is our own
+        // preview state and is cleared the instant the menu hides, while the
+        // engine scene lives until a teardown actually runs -- and a teardown
+        // can be deferred or refused outright. Begin() reads THIS, so a scene
+        // still standing is adopted instead of having a second one stacked on
+        // it. See Begin() for the report that found it.
+        bool                m_scene3D     = false;
 
         ImVec2 m_capturePos       = ImVec2(0.0f, 0.0f);
         ImVec2 m_captureSize      = ImVec2(0.0f, 0.0f);  // full rect including safety margin
