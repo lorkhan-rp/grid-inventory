@@ -4555,6 +4555,21 @@ namespace FUI::Wheeler
                         // the two surfaces agree instead of one of them being
                         // empty.
                         icon = Fallback::GetDrawn(face).icon;
+                        // ★★GI75: A SPELL HAS NO CATEGORY DRAWING. Fallback's
+                        // resolver knows weapons, armour, ammo, potions, books,
+                        // scrolls, keys, torches, ingredients -- and not
+                        // SpellItem, because the board never shows one. So in
+                        // the Drawn style the lookup above comes back empty and
+                        // a spell slot drew NOTHING at all (reported alongside
+                        // the purple icons). The wheel already owns a drawing
+                        // for every school -- the sigil pass behind the slot
+                        // uses it -- and it is the right face here as well.
+                        // Same Icon type, so the draw below needs no new case.
+                        if (!icon && magicUnder) {
+                            const char* key = SchoolOf(face);
+                            if (!key && UsesVoiceSlot(face)) key = "sym_power";
+                            if (key) icon = Symbol(key);
+                        }
                     }
                     if (icon && icon->srv) {
                         const auto tex = reinterpret_cast<ImTextureID>(icon->srv);

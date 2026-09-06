@@ -991,7 +991,7 @@ namespace FUI
 
     void ItemPreview::Request(RE::TESBoundObject* a_item, ImVec2 a_screenPos, ImVec2 a_screenSize,
                               float a_modelScale, float a_offsetX, float a_offsetY,
-                              const IconDef* a_def)
+                              const IconDef* a_def, bool a_spell)
     {
         if (!m_running || a_item == nullptr) return;
         // model-less leveled-item stubs CTD inside the engine's load task —
@@ -1024,7 +1024,7 @@ namespace FUI
                 _stricmp(mdlNew->GetModel(), mdlCur->GetModel()) == 0 &&
                 FindCurrentModel() != nullptr) {
                 m_current = a_item;
-                m_currentIsSpell = a_item->As<RE::SpellItem>() != nullptr;   // GI74
+                m_currentIsSpell = a_spell;   // GI74b: told by the caller, never derived here
                 m_def = a_def ? *a_def : IconDef{};
             }
         }
@@ -1075,7 +1075,7 @@ namespace FUI
                 SKSE::log::info("[PREVIEW] load '{}'", a_item->GetName());
             }
             m_current = a_item;
-            m_currentIsSpell = a_item->As<RE::SpellItem>() != nullptr;   // GI74
+            m_currentIsSpell = a_spell;   // GI74b: told by the caller, never derived here
             m_def = a_def ? *a_def : IconDef{};
         } else if (a_def && (a_def->rx != m_def.rx || a_def->ry != m_def.ry ||
                              a_def->rz != m_def.rz || a_def->scale != m_def.scale)) {

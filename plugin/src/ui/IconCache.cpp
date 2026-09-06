@@ -873,7 +873,11 @@ namespace FUI
         // cache-reset button. The old records cost a few kilobytes until the
         // next compaction and are never read. XOR with a constant is a
         // bijection, so it manufactures no collisions.
-        constexpr std::uint32_t kSpellCaptureSalt = 0x5BE11A01u;   // "spell 1"
+        // ★Bumped to 02: the first test build shipped half the fix (magenta
+        // backdrop + brightness alpha) and wrote solid pink squares under salt
+        // 01. Those records are as wrong as the purple ones and have to be
+        // orphaned the same way, or the retest serves them straight back.
+        constexpr std::uint32_t kSpellCaptureSalt = 0x5BE11A02u;   // "spell 2"
         if (a_obj && a_obj->As<RE::SpellItem>()) rot ^= kSpellCaptureSalt;
         return (static_cast<std::uint64_t>(ModelSlot32(a_obj)) << 32) | rot;
     }
@@ -2634,8 +2638,14 @@ namespace FUI
         // taken from the spell with a picture taken from the flame would file
         // the capture under a name nothing ever looks up, and the icon would
         // be re-photographed every single time it was asked for.
+        // ★GI74b: and the FIFTH thing that must agree -- whether this is a
+        // spell. The preview only ever sees the display model, so it cannot
+        // tell; the pending object can, and the backdrop it picks has to match
+        // the alpha rule PostRender applies. Half of that pair applied alone is
+        // the pink-square regression.
         pv->Request(CaptureSourceOf(m_pending.obj), ImVec2(0.0f, 0.0f),
-            ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def);
+            ImVec2(boxPx, boxPx), -1.0f, 0.0f, 0.0f, &def,
+            m_pending.obj && m_pending.obj->As<RE::SpellItem>() != nullptr);
         if (m_pending.boost > 0.0f) {
             pv->BoostCapture(m_pending.boost);   // B4: resume the clip-boost ladder
         }

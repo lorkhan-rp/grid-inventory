@@ -74,9 +74,15 @@ namespace FUI
         void End();
         void Render();
 
+        // ★GI74b: a_spell is TOLD, not derived. The object handed in is the
+        // spell's DISPLAY model (CaptureSourceOf), which is a plain static and
+        // will never answer As<SpellItem>() -- so deriving it here said "not a
+        // spell", kept the magenta backdrop, and the brightness-alpha pass on
+        // the other side then made that magenta solid: a ring of pink squares
+        // (zhenguoce, second screenshot). The caller knows; it says so.
         void Request(RE::TESBoundObject* a_item, ImVec2 a_screenPos, ImVec2 a_screenSize,
                      float a_modelScale = -1.0f, float a_offsetX = 0.0f, float a_offsetY = 0.0f,
-                     const IconDef* a_def = nullptr);
+                     const IconDef* a_def = nullptr, bool a_spell = false);
 
         // Called from the game-update hook (BEFORE the frame renders): applies
         // the def orientation and parks the model as soon as it lands, so the
