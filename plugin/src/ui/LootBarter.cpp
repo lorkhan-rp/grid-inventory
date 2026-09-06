@@ -4541,8 +4541,12 @@ namespace
                 // w/h. The note above about w/h and the angle never disagreeing
                 // now covers three things instead of two, and the only way to
                 // keep that true is to move them together.
+                // ★★AND NOT AN ABSENT ONE. An empty mask MEANS "solid
+                // rectangle" (see Solid), and rotating it would build a real
+                // 1x1 of all-false instead -- turning every ordinary tile into
+                // one that owns no square at all. Absent stays absent.
                 const int d = (a_rot - rot) & 3;
-                if (d != 0) mask = FUI::RotateShape(mask, d);
+                if (d != 0 && !mask.rows.empty()) mask = FUI::RotateShape(mask, d);
                 if (((rot ^ a_rot) & 1) != 0) std::swap(w, h);
                 rot = a_rot & 3;
             }
@@ -5120,7 +5124,18 @@ namespace
                 // ★GI71: BEFORE SetRot, and unrotated. SetRot turns the mask by
                 // the delta, so handing it an already-turned shape would turn it
                 // twice. Clamped to the partner board's own width.
-                pc.mask = FUI::ShapeOf(def, Grid::kCols);
+                //
+                // ★★ONLY WHEN THERE IS A SHAPE TO BUILD. This function runs on
+                // the RENDER path -- once per cell per frame -- and a Shape is a
+                // vector of vectors, so building one for every ordinary tile
+                // meant a few hundred heap allocations a frame on a merchant's
+                // hundred wares. An absent mask already MEANS "solid rectangle"
+                // to every consumer here (Solid, washCell, fits/mark, the
+                // ghost), so the 99% case now allocates nothing and behaves
+                // exactly as it did. Same rule the EDIT-mode gate a few hundred
+                // lines below was written for: no per-frame work to answer a
+                // question that is "no" almost always.
+                if (!def.shape.empty()) pc.mask = FUI::ShapeOf(def, Grid::kCols);
                 pc.SetRot(c.rot);
                 // GI42: the lock's resolution must MATCH the naming resolution.
                 // Locking only the worn cell while a spare cell could still pull

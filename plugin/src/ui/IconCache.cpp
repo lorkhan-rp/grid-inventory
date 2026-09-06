@@ -3925,6 +3925,13 @@ namespace FUI
         m_queued.clear();
         m_failed.clear();
         m_failLoaded = false;   // persisted fail keys reload on next access
+        // ★GI69: the two session-scoped companions of that list go with it. A
+        // cache reset is the player asking for a clean look, and a key holding
+        // one strike would be condemned by its very next timeout instead of
+        // getting the two the rule promises -- while a key already reported as
+        // skipped would stay silent about it.
+        m_strikes.clear();
+        m_failNoted.clear();
         m_pendingBusy = false;
         m_pinLastKey = 0;
         m_pinSprite.clear();
