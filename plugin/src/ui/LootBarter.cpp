@@ -5502,6 +5502,32 @@ namespace
                 const ImVec2 p0(base.x + it.col * cell, base.y + it.row * cell);
                 const float bw = it.w * cell, bh = it.h * cell;   // footprint box
 
+                // ★★GI71c: A WASH FOLLOWS THE FOOTPRINT, and there are three of
+                // them -- hover, search miss, and the pickpocket lock. Each
+                // painted the bounding box, so a shaped tile lit its own empty
+                // corners; and once a neighbour can sit in one of those corners,
+                // it lit THAT item's square as well, which reads as the wrong
+                // tile answering the cursor.
+                //
+                // ★One helper rather than three loops: the next wash somebody
+                // adds gets the footprint without having to know it should.
+                // Decorations are NOT washes and keep the box -- the sprite, the
+                // marker tray, the lock glyph and the edit ring are all placed
+                // against the tile's rectangle on purpose.
+                const auto washCell = [&](ImU32 a_col) {
+                    if (it.mask.rows.empty()) {
+                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh), a_col);
+                        return;
+                    }
+                    for (int y = 0; y < it.h; ++y) {
+                        for (int x = 0; x < it.w; ++x) {
+                            if (!it.Solid(x, y)) continue;
+                            const ImVec2 w0(p0.x + x * cell, p0.y + y * cell);
+                            dl->AddRectFilled(w0, ImVec2(w0.x + cell, w0.y + cell), a_col);
+                        }
+                    }
+                };
+
                 // click target: right-click = TAKE (loot mode). Barter buy is
                 // Phase 5. Gold ignores space; other items need a free cell.
                 // While carrying, SKIP the cell buttons — they'd swallow the drop
@@ -5535,8 +5561,7 @@ namespace
                     ImGui::SetCursorScreenPos(p0);
                     ImGui::InvisibleButton(idbuf, ImVec2(bw, bh));
                     if (ImGui::IsItemHovered() && !UIRoot::MouseInOverlay()) {
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            Theme::Acc(0.10f));
+                        washCell(Theme::Acc(0.10f));
                         Sfx::HoverNote(ImGui::GetItemID());   // partner cell hover
                         // Phase 4: rich tooltip; barter side shows the BUY price
                         int price = -1;
@@ -5910,8 +5935,7 @@ namespace
                     // ★Same wash and the same alpha the player's board uses for
                     // a search miss — one search, one look, both windows.
                     if (FindMisses(it.obj)) {
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            IM_COL32(6, 6, 10, 168));
+                        washCell(IM_COL32(6, 6, 10, 168));
                     }
                     // ★1.0.5: the shared marker tray, so poison keeps showing
                     // here now that DrawGlow no longer draws it. Favourite
@@ -6020,8 +6044,7 @@ namespace
                 if (g_mode == Mode::kPickpocket) {
                     if (it.locked) {
                         // greyed out: "and you can't have it"
-                        dl->AddRectFilled(p0, ImVec2(p0.x + bw, p0.y + bh),
-                            IM_COL32(0, 0, 0, 90));
+                        washCell(IM_COL32(0, 0, 0, 90));
                         const float ps = 10.0f * Theme::Scale();
                         const ImVec2 lp(p0.x + bw - ps - 4.0f, p0.y + bh - ps - 4.0f);
                         const ImU32 lc = IM_COL32(220, 200, 150, 230);
