@@ -1900,7 +1900,10 @@ namespace FUI
     // be wrong: the same item captured in 121ms the moment the list was deleted
     // by hand. So v3 lists are not evidence and are discarded, which is also
     // what frees the items already condemned on machines we will never see.
-    static constexpr const char* kFailVer = "; ver 4";
+    // ★v5: an armour with a ground model for one sex only is now healed before
+    // the capture (see Capturable), so every key v4 condemned for "no model" on
+    // such a record was condemned for a gap this build fills. Clean look.
+    static constexpr const char* kFailVer = "; ver 5";
 
     void IconCache::EnsureFailLoaded()
     {
@@ -2130,9 +2133,39 @@ namespace FUI
             // and 12 of them were exactly this: 45 frames each, 9 seconds of a
             // 71-second scan spent proving a blank string is still blank.
             if (auto* bip = a_obj->As<RE::TESBipedModelForm>()) {
-                const char* m = bip->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
-                const char* f = bip->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
-                if ((!m || !m[0]) && (!f || !f[0])) return false;
+                auto& wm = bip->worldModels[RE::TESBipedModelForm::Sexes::kMale];
+                auto& wf = bip->worldModels[RE::TESBipedModelForm::Sexes::kFemale];
+                const char* m = wm.GetModel();
+                const char* f = wf.GetModel();
+                const bool hasM = m && m[0];
+                const bool hasF = f && f[0];
+                if (!hasM && !hasF) return false;
+                // ★★GI78: A GROUND MODEL FOR ONE SEX ONLY IS FILLED FROM THE OTHER.
+                //
+                // The engine picks an armour's ground model by the PLAYER's sex,
+                // and a female-only outfit pack sets the female slot alone -- the
+                // Bride set measured here has MOD4 on every piece and MOD2 on
+                // none. Worn by a male character, every load came back with no
+                // task and no entry, self-heal reloaded three times into the
+                // same empty path, and the item was condemned for "no model"
+                // (log: model=false loading=false). There was never anything
+                // wrong with the mesh; the record simply had no answer for this
+                // character.
+                //
+                // ★Filled in memory, once, on first sight. Model paths are not
+                // saved, so nothing persists; and an empty slot can only gain a
+                // model where there was none, so vanilla's own inventory preview
+                // and a dropped item gain a picture too rather than lose one.
+                // SetModel is the engine's own virtual setter.
+                if (hasM != hasF) {
+                    if (hasM) wf.SetModel(m); else wm.SetModel(f);
+                    static std::unordered_set<RE::FormID> s_healed;
+                    if (s_healed.insert(a_obj->GetFormID()).second) {
+                        SKSE::log::info("[ICONS] '{}' has a ground model for one sex only "
+                                        "-- filled the {} slot from it",
+                            a_obj->GetName(), hasM ? "female" : "male");
+                    }
+                }
             }
             if (IsUnobtainable(a_obj)) return false;
             return true;
