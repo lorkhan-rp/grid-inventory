@@ -3332,7 +3332,14 @@ namespace FUI
                         }
                     }
                     if (!spellCapture) {
-                        constexpr int kReach = 2;
+                        // ★ONE pixel, measured. At two, a purple disc kept its
+                        // centre but lost a two-pixel band of pure colour inside
+                        // its rim ((150,40,170) -> (70,70,106) at d=4.5 on a
+                        // radius-6 disc). An anti-aliased edge is one pixel deep
+                        // at icon scale, and a blended pixel touches the backdrop
+                        // by construction, so one is enough for the fringe and
+                        // leaves everything that does not touch it alone.
+                        constexpr int kReach = 1;
                         const auto nearBg = [&](int a_x, int a_y) {
                             for (int dy = -kReach; dy <= kReach; ++dy) {
                                 const int yy = a_y + dy;
