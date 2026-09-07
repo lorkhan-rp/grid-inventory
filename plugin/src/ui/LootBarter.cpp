@@ -5773,7 +5773,10 @@ namespace
                                 // read: the engine's Use needs the player's
                                 // own copy and raised no page for a book still
                                 // in the chest (the 8/24 rework's regression).
-                                Grid::RequestShelfBookPage(bk, it.uid, it.sig);
+                                // GI79: name the chest, so the page can find the
+                                // unit's own list -- and the quest behind a note.
+                                Grid::RequestShelfBookPage(bk, it.uid, it.sig,
+                                    SourceRef() ? SourceRef()->GetFormID() : 0);
                                 // ...and the page offers E-take, the world
                                 // book's own grammar
                                 NoteShelfBookRead(it.obj, it.uid, it.sig,

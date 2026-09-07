@@ -11354,6 +11354,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             RE::FormID    form = 0;
             std::uint16_t uid = 0;
             std::uint16_t sig = 0;
+            // ★GI79: WHO HOLDS THE BOOK. 0 = the player. A shelf read names the
+            // container, so the page can find the unit's own ExtraDataList --
+            // which is where a quest note keeps the quest that fills its
+            // <Alias=...> tokens. Looking it up in the player's pack found
+            // nothing, and a page with no quest context cut off at the first
+            // token (reported).
+            RE::FormID    owner = 0;
         };
         std::optional<PendingRead> g_pendingRead;
         // ★(1.5.x) a SHELF book's page (no owner involved) -- see
@@ -11470,10 +11477,174 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // needs no owner: ShowBookPage raises TESBookReadEvent, so a skill book
     // still teaches exactly as reading it in the world does.
     void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                              std::uint16_t a_sig)
+                              std::uint16_t a_sig, RE::FormID a_owner)
     {
         if (!a_book) return;
-        g_pendingShelfPage = PendingRead{ a_book->GetFormID(), a_uid, a_sig };
+        g_pendingShelfPage = PendingRead{ a_book->GetFormID(), a_uid, a_sig, a_owner };
+    }
+
+    namespace
+    {
+        // ★★★GI79: THE ENGINE'S OWN TEXT REPLACEMENT, DONE THE ENGINE'S WAY.
+        //
+        // A book's DESC can carry <Alias=Name>, <Alias.ShortName=Name>, the
+        // pronoun forms, <Alias.Race=..>, <Alias.Sex=..> and <Global=EditorID>.
+        // The engine fills them from the QUEST that handed the note over: a
+        // quest-owned unit carries ExtraTextDisplayData with the quest and the
+        // instance id, and TESQuest::instanceData holds, per instance, "alias
+        // id -> the form whose name goes here" and "global -> its value at the
+        // time". GetDescription on the base form knows none of that, so the
+        // page we raise ourselves showed the tokens raw -- and the BookMenu's
+        // text field reads '<Alias=..>' as an HTML tag it does not know and
+        // swallows everything after it. That is the cut-off (reported: the
+        // jarl's inheritance letter, missives, notice-board notes).
+        //
+        // ★Resolved from the instance the note names when it exists, which is
+        // right even for a note from a finished radiant quest whose aliases
+        // have since moved on; the quest's live aliases are the fallback. A
+        // token nothing can answer is removed rather than left: an unanswered
+        // name reads wrong, a truncated letter reads as nothing at all.
+        [[nodiscard]] const char* SexWord(RE::SEX a_sex, const char* a_m,
+                                          const char* a_f, const char* a_n)
+        {
+            return a_sex == RE::SEX::kFemale ? a_f : a_sex == RE::SEX::kMale ? a_m : a_n;
+        }
+
+        void ResolveTextTokens(std::string& a_text, const RE::ExtraDataList* a_xl)
+        {
+            if (a_text.find('<') == std::string::npos) return;
+            const RE::ExtraTextDisplayData* xt = nullptr;
+            if (a_xl) {
+                xt = const_cast<RE::ExtraDataList*>(a_xl)->GetByType<RE::ExtraTextDisplayData>();
+            }
+            RE::TESQuest* quest = xt ? xt->ownerQuest : nullptr;
+            const std::int32_t instId =
+                xt ? static_cast<std::int32_t>(xt->ownerInstance.get()) : -1;
+            const RE::BGSQuestInstanceText* inst = nullptr;
+            if (quest && instId >= 0) {
+                for (const auto* it : quest->instanceData) {
+                    if (it && it->id == static_cast<std::uint32_t>(instId)) { inst = it; break; }
+                }
+            }
+            auto ieq = [](std::string_view a, std::string_view b) {
+                if (a.size() != b.size()) return false;
+                for (size_t i = 0; i < a.size(); ++i) {
+                    if (std::tolower(static_cast<unsigned char>(a[i])) !=
+                        std::tolower(static_cast<unsigned char>(b[i]))) return false;
+                }
+                return true;
+            };
+            // The form that fills an alias: the instance's record first, the
+            // quest's live alias second.
+            auto formOf = [&](std::string_view a_alias) -> RE::TESForm* {
+                if (!quest) return nullptr;
+                for (const auto* al : quest->aliases) {
+                    if (!al || !ieq(al->aliasName.c_str(), a_alias)) continue;
+                    if (inst) {
+                        for (const auto& sd : inst->stringData) {
+                            if (sd.aliasID == al->aliasID && sd.fullNameFormID) {
+                                if (auto* f = RE::TESForm::LookupByID(sd.fullNameFormID)) return f;
+                            }
+                        }
+                    }
+                    if (al->GetVMTypeID() == RE::BGSRefAlias::VMTYPEID) {
+                        return static_cast<const RE::BGSRefAlias*>(al)->GetReference();
+                    }
+                    return nullptr;
+                }
+                return nullptr;
+            };
+            auto nameOf = [](RE::TESForm* a_f) -> std::string {
+                if (!a_f) return {};
+                if (auto* r = a_f->As<RE::TESObjectREFR>()) {
+                    const char* n = r->GetDisplayFullName();
+                    return n ? n : "";
+                }
+                const char* n = a_f->GetName();
+                return n ? n : "";
+            };
+            auto npcOf = [](RE::TESForm* a_f) -> RE::TESNPC* {
+                if (!a_f) return nullptr;
+                if (auto* n = a_f->As<RE::TESNPC>()) return n;
+                if (auto* a = a_f->As<RE::Actor>()) return a->GetActorBase();
+                return nullptr;
+            };
+            static std::unordered_set<std::string> s_saidUnknown;
+
+            std::string out;
+            out.reserve(a_text.size());
+            size_t i = 0;
+            while (i < a_text.size()) {
+                const char c = a_text[i];
+                if (c != '<') { out.push_back(c); ++i; continue; }
+                const size_t close = a_text.find('>', i + 1);
+                if (close == std::string::npos) { out.append(a_text, i, std::string::npos); break; }
+                const std::string_view tag(a_text.data() + i + 1, close - i - 1);
+                // Only the replacement grammar is ours. <p>, <font>, <br>, <img>
+                // are the book's own markup and pass through untouched.
+                const bool isAlias  = tag.size() > 5 && ieq(tag.substr(0, 5), "Alias");
+                const bool isGlobal = tag.size() > 7 && ieq(tag.substr(0, 7), "Global=");
+                const bool isToken  = tag.size() > 5 && ieq(tag.substr(0, 5), "Token");
+                if (!isAlias && !isGlobal && !isToken) {
+                    out.append(a_text, i, close - i + 1);
+                    i = close + 1;
+                    continue;
+                }
+                std::string repl;
+                const size_t eq = tag.find('=');
+                const std::string_view kind = eq == std::string_view::npos ? tag : tag.substr(0, eq);
+                const std::string_view arg  = eq == std::string_view::npos ? std::string_view{} : tag.substr(eq + 1);
+                if (isGlobal) {
+                    float v = 0.0f; bool have = false;
+                    if (inst) {
+                        for (const auto& gd : inst->valueData) {
+                            const char* eid = gd.global ? gd.global->GetFormEditorID() : nullptr;
+                            if (eid && ieq(eid, arg)) { v = gd.value; have = true; break; }
+                        }
+                    }
+                    if (!have) {
+                        if (auto* g = RE::TESForm::LookupByEditorID<RE::TESGlobal>(std::string(arg))) {
+                            v = g->value; have = true;
+                        }
+                    }
+                    if (have) {
+                        repl = (std::fabs(v - std::round(v)) < 0.0005f)
+                                   ? std::to_string(static_cast<long long>(std::llround(v)))
+                                   : std::format("{:.2f}", v);
+                    }
+                } else if (isAlias) {
+                    // kind is "Alias" or "Alias.<Form>"
+                    const std::string_view form = kind.size() > 6 ? kind.substr(6) : std::string_view{};
+                    RE::TESForm* f = formOf(arg);
+                    RE::TESNPC*  npc = npcOf(f);
+                    const RE::SEX sex = npc ? npc->GetSex() : RE::SEX::kNone;
+                    if (form.empty())                       repl = nameOf(f);
+                    else if (ieq(form, "ShortName"))        repl = (npc && npc->shortName.c_str() && *npc->shortName.c_str()) ? npc->shortName.c_str() : nameOf(f);
+                    else if (ieq(form, "Pronoun"))          repl = SexWord(sex, "he", "she", "it");
+                    else if (ieq(form, "PronounObj"))       repl = SexWord(sex, "him", "her", "it");
+                    else if (ieq(form, "PronounPos"))       repl = SexWord(sex, "his", "her", "its");
+                    else if (ieq(form, "PronounPosObj"))    repl = SexWord(sex, "his", "hers", "its");
+                    else if (ieq(form, "PronounRefl"))      repl = SexWord(sex, "himself", "herself", "itself");
+                    else if (ieq(form, "CapPronoun"))       repl = SexWord(sex, "He", "She", "It");
+                    else if (ieq(form, "CapPronounObj"))    repl = SexWord(sex, "Him", "Her", "It");
+                    else if (ieq(form, "CapPronounPos"))    repl = SexWord(sex, "His", "Her", "Its");
+                    else if (ieq(form, "CapPronounPosObj")) repl = SexWord(sex, "His", "Hers", "Its");
+                    else if (ieq(form, "CapPronounRefl"))   repl = SexWord(sex, "Himself", "Herself", "Itself");
+                    else if (ieq(form, "Sex"))              repl = SexWord(sex, "male", "female", "");
+                    else if (ieq(form, "Race")) {
+                        auto* race = npc ? npc->GetRace() : nullptr;
+                        repl = race && race->GetFullName() ? race->GetFullName() : "";
+                    } else if (s_saidUnknown.insert(std::string(form)).second) {
+                        SKSE::log::info("[BOOK] unknown alias form '<{}>' -- dropped from the page", tag);
+                    }
+                } else if (s_saidUnknown.insert(std::string(kind)).second) {
+                    SKSE::log::info("[BOOK] unknown text token '<{}>' -- dropped from the page", tag);
+                }
+                out += repl;
+                i = close + 1;
+            }
+            a_text.swap(out);
+        }
     }
 
     // Raise the engine's page for a book we are only DISPLAYING. Handing it
@@ -11503,13 +11674,22 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     // What is true is that it is not the WHOLE reading: the engine's own menu
     // path spends a tome, and that spending is still done explicitly above.
     void ShowBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                      std::uint16_t a_sig)
+                      std::uint16_t a_sig, RE::FormID a_owner)
     {
         auto* player = RE::PlayerCharacter::GetSingleton();
         if (!player || !a_book) return;
-        auto* xl = ExtraForPool(LiveEntryOf(player, a_book), a_uid, a_sig);
-        RE::BSString desc;
-        a_book->GetDescription(desc, a_book);
+        // ★GI79: the unit's list comes from whoever HOLDS it. A shelf read used
+        // to look in the player's pack, find nothing, and raise a page with no
+        // quest behind it.
+        RE::TESObjectREFR* owner =
+            a_owner ? RE::TESForm::LookupByID<RE::TESObjectREFR>(a_owner) : nullptr;
+        if (!owner) owner = player;
+        auto* xl = ExtraForPool(LiveEntryOf(owner, a_book), a_uid, a_sig);
+        RE::BSString raw;
+        a_book->GetDescription(raw, a_book);
+        std::string text = raw.c_str() ? raw.c_str() : "";
+        ResolveTextTokens(text, xl);   // GI79
+        RE::BSString desc(text.c_str());
         // ★★The NG line declares BookMenu::OpenBookMenu and never defines it,
         // so the call is made here through the same address-library id
         // CommonLib itself used. Same function, same arguments -- only the
@@ -11589,7 +11769,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 return;
             }
             SKSE::log::info("[BOOK] the engine raised no page -- showing it ourselves");
-            ShowBookPage(book, req.uid, req.sig);
+            ShowBookPage(book, req.uid, req.sig, req.owner);
             return;
         }
 
@@ -11602,7 +11782,7 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
             auto* sui = RE::UI::GetSingleton();
             if (sbook && sui && !sui->IsMenuOpen(RE::BookMenu::MENU_NAME)) {
                 SKSE::log::info("[BOOK] shelf read -- raising the page in place");
-                ShowBookPage(sbook, sreq.uid, sreq.sig);
+                ShowBookPage(sbook, sreq.uid, sreq.sig, sreq.owner);
             }
             return;
         }

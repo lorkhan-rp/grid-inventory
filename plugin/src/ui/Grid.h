@@ -313,8 +313,11 @@ namespace FUI::Grid
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
     // ★(1.5.x) a SHELF book (not owned): raise the page in place -- no
     // engine Use, which needs the player's own copy.
+    // ★GI79: a_owner names the container holding the book (0 = the player), so
+    // the page can reach the unit's own ExtraDataList and the quest that fills
+    // its <Alias=...> tokens.
     void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
-                              std::uint16_t a_sig);
+                              std::uint16_t a_sig, RE::FormID a_owner = 0);
     void ProcessBookRead();   // UIRoot::Tick
 
     // GI32: apply queued favourite toggles. MUST run on the game thread --
