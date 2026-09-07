@@ -2159,11 +2159,17 @@ namespace FUI
                 // SetModel is the engine's own virtual setter.
                 if (hasM != hasF) {
                     if (hasM) wf.SetModel(m); else wm.SetModel(f);
-                    static std::unordered_set<RE::FormID> s_healed;
-                    if (s_healed.insert(a_obj->GetFormID()).second) {
+                    // ★A handful of lines, not one per record: a load-order sweep
+                    // healed 3098 of these in one session and the log was a
+                    // third this message. The rule is deterministic; five
+                    // examples say it is running and which way.
+                    static int s_said = 0;
+                    if (s_said < 5) {
+                        ++s_said;
                         SKSE::log::info("[ICONS] '{}' has a ground model for one sex only "
-                                        "-- filled the {} slot from it",
-                            a_obj->GetName(), hasM ? "female" : "male");
+                                        "-- filled the {} slot from it{}",
+                            a_obj->GetName(), hasM ? "female" : "male",
+                            s_said == 5 ? " (further ones not logged)" : "");
                     }
                 }
             }
