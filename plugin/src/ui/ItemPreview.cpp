@@ -506,7 +506,7 @@ namespace FUI
     {
         if (!a_device) return false;
         // Already built for this surface.
-        if (m_dstTex && m_dstSRV && m_scratchTex &&
+        if (m_dstTex && m_dstSRV && m_scratchTex && m_dstTexB &&
             m_texFormat == static_cast<std::uint32_t>(a_src.Format) &&
             m_texW == a_src.Width && m_texH == a_src.Height) {
             return true;
@@ -519,6 +519,7 @@ namespace FUI
         // outside: every step "succeeded" and the pixels never arrived.
         if (m_dstSRV)     { m_dstSRV->Release();     m_dstSRV = nullptr; }
         if (m_dstTex)     { m_dstTex->Release();     m_dstTex = nullptr; }
+        if (m_dstTexB)    { m_dstTexB->Release();    m_dstTexB = nullptr; }
         if (m_scratchTex) { m_scratchTex->Release(); m_scratchTex = nullptr; }
 
         D3D11_TEXTURE2D_DESC desc = {};
@@ -542,6 +543,13 @@ namespace FUI
         // rect-only restore leaves any overspill visible (oversized items
         // peeking past the caching card for the capture frame). Full
         // save/restore reverts every pixel we touched.
+        // GI77: the white pass lands here. Same shape as the black pass; it is
+        // only ever read back on the CPU, never sampled, so no SRV.
+        if (FAILED(a_device->CreateTexture2D(&desc, nullptr, &m_dstTexB))) {
+            m_dstSRV->Release(); m_dstSRV = nullptr;
+            m_dstTex->Release(); m_dstTex = nullptr;
+            return false;
+        }
         D3D11_TEXTURE2D_DESC sdesc = a_src;
         sdesc.MipLevels      = 1;
         sdesc.ArraySize      = 1;
@@ -552,6 +560,7 @@ namespace FUI
         if (FAILED(a_device->CreateTexture2D(&sdesc, nullptr, &m_scratchTex))) {
             m_dstSRV->Release(); m_dstSRV = nullptr;
             m_dstTex->Release(); m_dstTex = nullptr;
+            m_dstTexB->Release(); m_dstTexB = nullptr;
             return false;
         }
 
@@ -574,6 +583,7 @@ namespace FUI
 
         release(m_dstSRV);
         release(m_dstTex);
+        release(m_dstTexB);
         release(m_scratchTex);
         m_initialized = false;
     }
@@ -1268,7 +1278,7 @@ namespace FUI
             auto* dev = reinterpret_cast<ID3D11Device*>(data->forwarder);
             if (!EnsureCaptureTextures(dev, bd)) { srcTex->Release(); return; }
         }
-        if (!m_dstTex || !m_scratchTex) { srcTex->Release(); return; }
+        if (!m_dstTex || !m_dstTexB || !m_scratchTex) { srcTex->Release(); return; }
 
         // Compute the clamped backbuffer rect once. Save/clear/capture/restore
         // all operate on this single box.
@@ -1407,10 +1417,9 @@ namespace FUI
             if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
                     reinterpret_cast<void**>(&ctx1))) && ctx1) {
                 D3D11_RECT rect = { left, top, left + width, top + height };
-                // ★GI74: a spell is additive and sums the backdrop into itself,
-                // so its backdrop is black. See kCaptureBgSpell.
-                ctx1->ClearView(rtv, m_currentIsSpell ? kCaptureBgSpell : kCaptureBg,
-                                &rect, 1);
+                // GI77: pass A is always black -- for an item it is one half of
+                // the matte, for a spell it is the whole capture.
+                ctx1->ClearView(rtv, kMatteBlack, &rect, 1);
                 ctx1->Release();
             }
         }
@@ -1434,6 +1443,22 @@ namespace FUI
 
         // Step 4 (capture): copy backbuffer rect → top-left of our texture.
         context->CopySubresourceRegion(m_dstTex, 0, 0, 0, 0, srcTex, 0, &box);
+        // ★★GI77: PASS B, the same model over WHITE, into the second texture.
+        // The scene has not moved between the two draws -- same frame, same
+        // rig, same rotation -- so the only thing that differs is what shows
+        // through, and that difference is read back as the alpha. Skipped for
+        // a spell (see kMatteWhite): an additive glow over white saturates.
+        if (!m_currentIsSpell) {
+            ID3D11DeviceContext1* ctx1 = nullptr;
+            if (SUCCEEDED(context->QueryInterface(__uuidof(ID3D11DeviceContext1),
+                    reinterpret_cast<void**>(&ctx1))) && ctx1) {
+                D3D11_RECT rect = { left, top, left + width, top + height };
+                ctx1->ClearView(rtv, kMatteWhite, &rect, 1);
+                ctx1->Release();
+            }
+            inv->Render();
+            context->CopySubresourceRegion(m_dstTexB, 0, 0, 0, 0, srcTex, 0, &box);
+        }
 
         // Diagnostic probe (first few captures with a loaded model): read the
         // captured rect back and count pixels that differ from the painted

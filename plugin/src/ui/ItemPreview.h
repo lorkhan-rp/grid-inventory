@@ -55,18 +55,25 @@ namespace FUI
         // cast, and min(R,B)-G is exactly how much of it to remove -- being
         // symmetric in R/B, that arithmetic never has to care whether the
         // surface is BGRA or RGBA.
-        static constexpr float kCaptureBg[4] = { 1.0f, 0.0f, 1.0f, 0.0f };
-        // ★★GI74: BLACK for a SPELL. A spell's display object is a glow drawn
-        // with an ADDITIVE effect shader, and additive means dst + src: the
-        // backdrop's own colour is summed into every pixel the effect touches,
-        // and alpha -- 0 on the clear, whatever the shader writes after -- has
-        // no say in it. Over magenta that is a magenta glow with the spell
-        // faintly inside it, which is the reported ring of purple blobs
-        // (zhenguoce, screenshot). Over black, dst + src is just src: the glow
-        // the game itself draws in its magic menu. The min(R,B)-G spill
-        // arithmetic is for blended cloth and is not applied to spells at all
-        // -- see IconCache's sprite pass.
-        static constexpr float kCaptureBgSpell[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        // ★★★GI77: TWO BACKDROPS, AND ALPHA IS NEVER READ AGAIN.
+        //
+        // One backdrop cannot tell a half-transparent pixel from an opaque
+        // pixel of the backdrop's colour, and every heuristic that followed --
+        // the magenta spill, the hides rule, the colour-key fallback, the
+        // one-pixel reach -- was an attempt to guess which it was. Two
+        // backdrops make it arithmetic. The same model is drawn once over
+        // black and once over white; where the two agree the pixel is opaque,
+        // where they differ by the whole backdrop it is transparent, and the
+        // difference in between IS the transparency. The colour comes straight
+        // out of the black pass. No surface alpha is consulted, so a 10-bit
+        // surface with two alpha bits and a surface that hands back none at
+        // all get exactly the same result as a perfect one.
+        //
+        // A SPELL takes the black pass only: an additive glow over white
+        // saturates instead of blending, so its alpha is its brightness (see
+        // IconCache's sprite pass), which the black pass alone provides.
+        static constexpr float kMatteBlack[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+        static constexpr float kMatteWhite[4] = { 1.0f, 1.0f, 1.0f, 0.0f };
 
         static ItemPreview* GetSingleton();
 
@@ -101,7 +108,8 @@ namespace FUI
 
         // IconCache support: raw capture texture and a monotonically
         // increasing stamp (bumped on every completed capture).
-        ID3D11Texture2D*    GetTexture() const { return m_dstTex; }
+        ID3D11Texture2D*    GetTexture() const { return m_dstTex; }    // black pass
+        ID3D11Texture2D*    GetTextureB() const { return m_dstTexB; }  // white pass (GI77)
         std::uint32_t       GetCaptureStamp() const { return m_captureStamp; }
 
         // The loadedModels entry matching m_current (async loads land late, so
@@ -264,6 +272,7 @@ namespace FUI
         ID3D11Texture2D*          m_dstTex     = nullptr;
         ID3D11ShaderResourceView* m_dstSRV     = nullptr;
         ID3D11Texture2D*          m_scratchTex = nullptr;
+        ID3D11Texture2D*          m_dstTexB    = nullptr;   // GI77: the white pass
         // ★★What the capture textures were built for. renderWindows[0] is NOT
         // reliably the surface the engine draws into: with a D3D12 swap chain
         // (CS Upscaling) it is a different resource in a different format —
