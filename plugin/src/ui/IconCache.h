@@ -425,6 +425,18 @@ namespace FUI
         float m_captureShrink = 1.0f;
         static constexpr float kMinCaptureShrink = 0.4f;   // 2.5x -> 1.0x floor
 
+        // ★GI80: the INSPECT's own second rung. The C view was exempt from the
+        // shrink above on purpose -- m_captureShrink is the tile ladder's
+        // state, reset per queued item -- and so a model that overflowed the
+        // screen at 3x was baked with its ends sliced off: "the 3D preview has
+        // a bounding box that cuts off the top and bottom of long items"
+        // (zhenguoce, 1440p). The screen IS the bounding box: the capture reads
+        // backbuffer pixels and nothing past its edge exists to read.
+        // One factor per inspected item, only ever lowered while it is open, so
+        // a drag cannot make it oscillate; SetInspect starts the next item at 1.
+        float m_inspectShrink = 1.0f;
+        static constexpr float kMinInspectShrink = 0.33f;   // 3.0x -> 1.0x floor
+
         // Pixel style: derived sprites, keyed exactly like m_icons. Memory
         // only — re-deriving costs a pak read plus a downscale, which is
         // cheaper than owning a second pak file and keeping it in sync.

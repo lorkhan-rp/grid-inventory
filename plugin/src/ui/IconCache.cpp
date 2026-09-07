@@ -558,9 +558,10 @@ namespace FUI
         m_inspect = a_obj;
         SetInspectRot(a_rx, a_ry, a_rz);
         m_inspectValid = false;   // nothing captured yet ("caching" for a frame)
+        m_inspectShrink = 1.0f;   // GI80: a fresh ladder for a fresh item
         // no pin, no cache key: PreRender simply gives the preview to this item
         // while the overlay is open, and the result lands in m_inspectIcon
-        ItemPreview::GetSingleton()->SetInspectScale(kInspectModelScale);
+        ItemPreview::GetSingleton()->SetInspectScale(kInspectModelScale * m_inspectShrink);
     }
 
     void IconCache::SetInspectRot(float a_rx, float a_ry, float a_rz)
@@ -2657,7 +2658,9 @@ namespace FUI
         // just grows to cover the enlarged model. The box is still clamped to
         // what the screen can physically render (margin included) — pixels
         // the backbuffer cannot hold do not exist to capture.
-        pv->SetInspectScale(m_pendingInspect ? kInspectModelScale
+        // ★GI80: the inspect carries its own shrink (see m_inspectShrink) --
+        // the same rung the tiles have, kept apart from the tile ladder's state.
+        pv->SetInspectScale(m_pendingInspect ? kInspectModelScale * m_inspectShrink
                                              : kIconCaptureScale * m_captureShrink);
         // ★★The capture lamp belongs to the ITEM, and it has to be set from the
         // SAME def this request carries — set it anywhere else and a slow
@@ -3474,7 +3477,23 @@ namespace FUI
                 // is a small loss; a sprite with its silhouette sliced off is
                 // wrong forever, and the pixel style outlines that cut into a
                 // rectangle around the icon.
-                if (!m_pendingInspect && m_captureShrink > kMinCaptureShrink) {
+                // ★GI80: the INSPECT takes this rung too, on its own factor.
+                // It used to be excluded here outright, so a 3x model that
+                // reached the screen edge went on to the trim below and was
+                // shown with its ends cut flat -- a picture of the screen's
+                // border, not of the item. Not published until it fits (or
+                // the floor is reached): the overlay shows "caching" for the
+                // extra frame or two instead of a sliced sprite that then
+                // pops to a whole one.
+                if (m_pendingInspect) {
+                    if (m_inspectShrink > kMinInspectShrink) {
+                        m_inspectShrink = (std::max)(kMinInspectShrink, m_inspectShrink * 0.7f);
+                        SKSE::log::info("[ICONS] inspect '{}' reaches the screen edge at {}x{} -- "
+                            "retry at {:.0f}% model scale",
+                            m_pending.obj->GetName(), w, h, m_inspectShrink * 100.0f);
+                        return;
+                    }
+                } else if (m_captureShrink > kMinCaptureShrink) {
                     m_captureShrink = (std::max)(kMinCaptureShrink, m_captureShrink * 0.7f);
                     SKSE::log::info("[ICONS] '{}' still clipped at box ceiling {:.0f}px — "
                         "retry at {:.0f}% model scale",
