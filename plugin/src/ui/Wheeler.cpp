@@ -4541,6 +4541,7 @@ namespace FUI::Wheeler
                     // had been opened by hand. Asking loads it from the pak on
                     // the spot; a costume never captured before joins the
                     // normal queue instead of staying invisible forever.
+                    bool symbolFace = false;   // GI75b: the face is a school glyph
                     if (!icon && face) {
                         cache->QueueCapture(face);
                         // ★★★AND FALL BACK TO THE DRAWN ICON, exactly as the
@@ -4568,7 +4569,10 @@ namespace FUI::Wheeler
                         if (!icon && magicUnder) {
                             const char* key = SchoolOf(face);
                             if (!key && UsesVoiceSlot(face)) key = "sym_power";
-                            if (key) icon = Symbol(key);
+                            if (key) {
+                                icon = Symbol(key);
+                                symbolFace = icon != nullptr;
+                            }
                         }
                     }
                     if (icon && icon->srv) {
@@ -4594,7 +4598,13 @@ namespace FUI::Wheeler
                         // stores 160x155 and the part you can actually see on
                         // black is a fifth of it. At the item's 1.34 the core
                         // came out a dot (reported).
-                        const float faceFit = magicUnder ? 2.40f : 1.34f;
+                        // ★GI75b: 2.40 is for a CAPTURED spell -- a glow whose
+                        // sprite is mostly dark margin, so it needs the room. A
+                        // school glyph fills its PNG edge to edge; at 2.40 it
+                        // overran the slot and the ring (reported, screenshot).
+                        // Sized like the sigil pass sizes the same drawing.
+                        const float faceFit = symbolFace ? kSigilScale
+                                            : magicUnder ? 2.40f : 1.34f;
                         const float fit = (sz * faceFit) / (std::max)(aw, ah);
                         const float hw = aw * fit, hh = ah * fit;
                         // ★★A PICTURE WHOSE MIDDLE IS NOT ITS CENTRE gets the
