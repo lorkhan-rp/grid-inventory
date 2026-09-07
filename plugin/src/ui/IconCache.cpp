@@ -3076,6 +3076,10 @@ namespace FUI
         // the pending object is live -- so neither stage re-derives it.
         const bool spellCapture =
             m_pending.obj && m_pending.obj->As<RE::SpellItem>() != nullptr;
+        // ★GI76: set by the readback when the surface gave no alpha and the
+        // backdrop had to be keyed by colour. The sprite pass reads it so it
+        // does not correct, a second time, a pixel the key already un-blended.
+        bool colourKeyed = false;
 
         // Pixel rect of the FULL margin region (kSafetyMargin x inner box):
         // rotation diagonals that outgrow the inner box stay uncut; tiles
@@ -3284,11 +3288,91 @@ namespace FUI
                     if (pixels[i] == 0) { alphaOk = true; break; }
                 }
                 if (!alphaOk && !pixels.empty()) {
-                    for (size_t i = 0; i < pixels.size(); i += 4) {
-                        // Symmetric in R/B, so BGRA vs RGBA never matters.
-                        const bool key = pixels[i] > 200 && pixels[i + 2] > 200 &&
-                                         pixels[i + 1] < 60;
-                        pixels[i + 3] = key ? 0 : 255;
+                    colourKeyed = !spellCapture;   // a spell's backdrop is black: nothing to un-blend
+                    // ★★GI76: A HALF-MAGENTA PIXEL NEXT TO THE BACKDROP IS A
+                    // HALF-TRANSPARENT ONE.
+                    //
+                    // This branch used to keep every pixel that was not pure
+                    // backdrop as fully opaque, blend and all -- the pre-v8
+                    // chroma-key defect, alive on exactly the machines whose
+                    // surface hands back no alpha: a fur tip that was 30%
+                    // magenta stayed 30% magenta (reported, hide and pelt,
+                    // fmt=28 with "returned no alpha").
+                    //
+                    // The blend is observed = model*(1-f) + magenta*f, and the
+                    // magenta share f is what the alpha path measures as
+                    // min(R,B)-G: on natural colours the model's own min(R,B)
+                    // sits near its G, so what is left over is the backdrop.
+                    // f = spill/255, alpha = 1-f, colour divided back out.
+                    //
+                    // ★★ONLY BESIDE THE BACKDROP. Without alpha there is nothing
+                    // else that tells a blended edge from a thing that is simply
+                    // purple: an amethyst, a potion, an enchant glow all read as
+                    // "spill" and were bleached to grey glass by a first draft of
+                    // this (measured offline: (150,40,170) -> (70,70,106) a=145).
+                    // A blended pixel is, by construction, where the model meets
+                    // the backdrop; an interior pixel is not. So the correction
+                    // runs within two pixels of a keyed square and nowhere else --
+                    // the rule the old defringe used for the same reason.
+                    // Pass 1: the pure backdrop, with a TIGHT key. The old
+                    // 200/200/60 caught a pixel that was still a quarter model and
+                    // threw it away; now it gets its quarter of alpha instead.
+                    std::vector<std::uint8_t> bgMask(static_cast<size_t>(w) * h, 0);
+                    for (int y = 0; y < h; ++y) {
+                        for (int x = 0; x < w; ++x) {
+                            auto* p = pixels.data() + (static_cast<size_t>(y) * w + x) * 4;
+                            // Symmetric in R/B, so BGRA vs RGBA never matters.
+                            const bool key = p[0] >= 245 && p[2] >= 245 && p[1] <= 12;
+                            if (key) {
+                                p[0] = p[1] = p[2] = p[3] = 0;
+                                bgMask[static_cast<size_t>(y) * w + x] = 1;
+                            } else {
+                                p[3] = 255;
+                            }
+                        }
+                    }
+                    if (!spellCapture) {
+                        constexpr int kReach = 2;
+                        const auto nearBg = [&](int a_x, int a_y) {
+                            for (int dy = -kReach; dy <= kReach; ++dy) {
+                                const int yy = a_y + dy;
+                                if (yy < 0 || yy >= h) continue;
+                                for (int dx = -kReach; dx <= kReach; ++dx) {
+                                    const int xx = a_x + dx;
+                                    if (xx < 0 || xx >= w) continue;
+                                    if (bgMask[static_cast<size_t>(yy) * w + xx]) return true;
+                                }
+                            }
+                            return false;
+                        };
+                        // Pass 2: un-blend the edge. Reads the pass-1 mask, never
+                        // its own output, so a pixel it clears cannot pull its
+                        // neighbours in after it (no inward cascade).
+                        for (int y = 0; y < h; ++y) {
+                            for (int x = 0; x < w; ++x) {
+                                auto* p = pixels.data() + (static_cast<size_t>(y) * w + x) * 4;
+                                if (p[3] == 0) continue;
+                                const int r = p[0], g = p[1], b = p[2];
+                                const int spill = (std::min)(r, b) - g;
+                                if (spill <= 0 || !nearBg(x, y)) continue;   // no backdrop in it, or interior colour
+                                const float f = (std::min)(1.0f, static_cast<float>(spill) / 255.0f);
+                                const float keep = 1.0f - f;
+                                if (keep < 0.04f) {   // all backdrop after all
+                                    p[0] = p[1] = p[2] = p[3] = 0;
+                                    continue;
+                                }
+                                const auto unblend = [&](int a_c, bool a_magenta) {
+                                    const float v = (static_cast<float>(a_c) -
+                                                     (a_magenta ? 255.0f * f : 0.0f)) / keep;
+                                    return static_cast<std::uint8_t>(
+                                        (std::max)(0.0f, (std::min)(255.0f, v)));
+                                };
+                                p[0] = unblend(r, true);
+                                p[1] = unblend(g, false);
+                                p[2] = unblend(b, true);
+                                p[3] = static_cast<std::uint8_t>(keep * 255.0f + 0.5f);
+                            }
+                        }
                     }
                     static bool s_saidKey = false;
                     if (!s_saidKey) {
@@ -3468,6 +3552,12 @@ namespace FUI
                     continue;
                 }
                 const int a = px[3];
+                // ★GI76: a colour-keyed capture arrives here already un-blended,
+                // with the alpha the key measured. The spill rule below would
+                // subtract backdrop that is no longer there, and the hides rule
+                // would then call the leftover "not transparency" and force it
+                // opaque -- undoing the whole correction. Trust the key.
+                if (colourKeyed && a > 0 && a < 255) continue;
                 if (a == 0) {
                     px[0] = px[1] = px[2] = 0;
                 } else if (a < 255) {
