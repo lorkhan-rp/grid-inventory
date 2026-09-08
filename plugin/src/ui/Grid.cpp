@@ -3598,6 +3598,11 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                             !ImGui::GetIO().WantTextInput &&
                             !GoldCoins::IsCoinForm(fid)) {
                             ToggleFavorite(it.key, it.obj, it.uid, it.xlIdx, it.sig);
+                            // GI81 diag: the press itself, so a toggle that
+                            // never reaches the engine can be told from one
+                            // that did and had no effect. One line per click.
+                            SKSE::log::info("[FAV] F on '{}' key='{}' uid {:04X} xl {} sig {:04X} count {}",
+                                it.obj->GetName(), it.key, it.uid, it.xlIdx, it.sig, it.count);
                             Sfx::Favorite();
                             // ★S1: no rebuild -- the star lands when the engine
                             // applies it (ProcessFavorites), and THAT refreshes
@@ -9318,8 +9323,10 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
         for (const auto& f : q) {
             // tripwire witness: this form's star state is changing on purpose
             if (f.obj) g_starChangeOk.insert(f.obj->GetFormID());
+            bool found = false;
             for (auto* entry : *changes->entryList) {
                 if (!entry || entry->object != f.obj) continue;
+                found = true;
                 const std::string base = FormKey(f.obj);
                 // The pool a list belongs to, by CONTENT -- never by pointer.
                 // RemoveFavorite/SetFavorite create and destroy lists, so a
@@ -9376,6 +9383,34 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                 // nothing changed on screen.
                 const std::uint16_t tsig = xl ? InstanceSig(xl) : 0;
                 const bool on = PoolHasStar(entry, f.uid, tsig);
+                // ★GI81 diag: one line per press, UNCONDITIONALLY. The first
+                // TEST 10 log had no trace of the press at all, and a whole
+                // test cycle went on telling the silent branches apart. A
+                // favourite is a click, not a frame; the line is cheap.
+                // The snapshot is taken BEFORE any branch mutates the lists,
+                // and `hit` is resolved now because RemoveFavorite may free
+                // the very list `xl` points at (that was a real crash once).
+                auto listsNow = [&]() {
+                    std::string ls;
+                    if (entry->extraLists) {
+                        for (auto* x2 : *entry->extraLists) {
+                            if (!x2) continue;
+                            std::uint16_t u = 0;
+                            if (const auto* xu = x2->GetByType<RE::ExtraUniqueID>()) {
+                                u = xu->uniqueID;
+                            }
+                            ls += std::format("[{} n{}{}{}] ",
+                                PoolPrefix(base, u, InstanceSig(x2)), x2->GetCount(),
+                                x2->HasType<RE::ExtraHotkey>() ? " HOT" : "",
+                                (x2->HasType<RE::ExtraWorn>() ||
+                                 x2->HasType<RE::ExtraWornLeft>()) ? " WORN" : "");
+                        }
+                    }
+                    return ls.empty() ? std::string("-") : ls;
+                };
+                const std::string before = listsNow();
+                const std::string hit    = xl ? poolOf(xl) : std::string("-");
+                const char*       via    = "?";
                 // ★★Tell the wheel the moment the star comes off, not the next
                 // time it happens to look. It re-reads the favourites only when
                 // it opens, so unstar-and-restar inside one inventory visit was
@@ -9411,10 +9446,13 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                     clearPools(all);
+                    via = "off-all";
                 } else if (on) {
                     clearPools({ PoolPrefix(base, f.uid, tsig) });
+                    via = "off-pool";
                 } else if (xl) {
                     xl->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
+                    via = "self";
                 } else {
                     // No list of its own, and the pool has no star anywhere else.
                     // Only the engine can split a unit off the stack, and
@@ -9471,43 +9509,75 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                         }
                     }
                     if (spliced == 0) {
+                        via = "mint-none";
                         SKSE::log::warn("[FAV] '{}': the engine minted no list for the plain "
                                         "unit -- the star has nowhere to sit",
                             f.obj->GetName());
-                    } else if (hidden) {
-                        SKSE::log::info("[FAV] '{}': plain unit starred on a list minted "
-                                        "behind hidden siblings ({} spliced)",
-                            f.obj->GetName(), spliced);
+                    } else {
+                        via = hidden ? "mint-hidden" : "mint-bare";
                     }
                 }
-                // ★Back behind the trace switch. It was unconditional while the
-                // question was open, and it answered it: the engine mints a list
-                // only for an entry that has none, so "via=engine" on an entry
-                // with variants always lands on a sibling. Nothing left to catch
-                // here every press.
-                if (g_poolTrace) {
-                    std::string ls;
-                    if (entry->extraLists) {
-                        for (auto* x2 : *entry->extraLists) {
-                            if (!x2) continue;
-                            std::uint16_t u = 0;
-                            if (const auto* xu = x2->GetByType<RE::ExtraUniqueID>()) {
-                                u = xu->uniqueID;
-                            }
-                            ls += std::format("[{}{}] ",
-                                PoolPrefix(FormKey(f.obj), u, InstanceSig(x2)),
-                                x2->HasType<RE::ExtraHotkey>() ? " HOT" : "");
-                        }
-                    }
-                    SKSE::log::info("[FAV] toggle uid {:04X} xl {} was={} via={}"
-                                    " asked='{}' hit='{}' | {}",
-                        f.uid, f.xlIdx, on ? "on" : "off",
-                        xl ? "self" : "engine",
-                        PoolPrefix(base, f.uid, tsig),
-                        xl ? poolOf(xl) : std::string("-"),
-                        ls.empty() ? "-" : ls);
-                }
+                // ★The one line that says what happened: the branch, the lists
+                // before and after, and whether the pool the player pointed at
+                // reads as starred NOW -- which is exactly what the tile will
+                // draw. (This used to sit behind g_poolTrace; see the diag note
+                // at the snapshot above for why it is unconditional.)
+                SKSE::log::info("[FAV] toggle '{}' uid {:04X} xl {} sig {:04X} was={} via={} "
+                                "asked='{}' hit='{}' delta={} | before {}| after {}| star now={}",
+                    f.obj->GetName(), f.uid, f.xlIdx, tsig, on ? "on" : "off", via,
+                    PoolPrefix(base, f.uid, tsig), hit, entry->countDelta,
+                    before, listsNow(), PoolHasStar(entry, f.uid, tsig) ? "yes" : "no");
                 break;
+            }
+            if (!found) {
+                // ★★★GI82: THE UNIT HAS NO ENTRY, SO MAKE ONE.
+                //
+                // The board counts through GetInventory, which walks the base
+                // container AND the changes; InventoryChanges::entryList holds
+                // only the changes. A unit nothing has ever happened to lives
+                // in the base container alone and has NO entry here -- and
+                // this loop, finding nothing, used to return without a word.
+                // Measured (TEST 10 diag): 'Iron War Axe', count 1, no entry.
+                // That IS the report: "an item never equipped will not take a
+                // star; equip and unequip it once, or drop and pick it up, and
+                // it will" -- each of those is the engine creating the entry.
+                // (The sibling-list case above, GI81, is real too; it is just
+                // not the common one.)
+                //
+                // ★The engine does exactly this for a base unit the moment it
+                // is worn: an entry with countDelta 0 (the unit is still the
+                // container's) carrying the worn list. Same shape here, with
+                // the hotkey list the engine mints on a bare entry. The class
+                // is 0x18 in every runtime, the ctor is the library's, the
+                // allocation is the game heap (TES_HEAP_REDEFINE_NEW), and
+                // AddEntryData is the library's push_front + changed=true.
+                // ★A request that NAMES a unit (uid or sig) cannot be for a
+                // listless base unit -- that is a stale click, not a licence
+                // to invent an entry for something else.
+                if (!f.obj || f.uid != 0 || f.sig != 0 || f.worn) {
+                    SKSE::log::warn("[FAV] '{}' ({:08X}): no InventoryChanges entry and the "
+                                    "request names a unit (uid {:04X} sig {:04X} worn={}) -- "
+                                    "stale, ignored",
+                        f.obj ? f.obj->GetName() : "-", f.obj ? f.obj->GetFormID() : 0u,
+                        f.uid, f.sig, f.worn);
+                    continue;
+                }
+                auto* fresh = new RE::InventoryEntryData(f.obj, 0);
+                changes->AddEntryData(fresh);
+                changes->SetFavorite(fresh, nullptr);   // bare entry: the engine mints {Hotkey}
+                const bool starred = PoolHasStar(fresh, 0, 0);
+                if (starred) {
+                    Wheeler::NoteStarred(f.obj->GetFormID());
+                    SKSE::log::info("[FAV] '{}' ({:08X}): had no InventoryChanges entry -- "
+                                    "made one (delta 0) and the engine starred it",
+                        f.obj->GetName(), f.obj->GetFormID());
+                } else {
+                    SKSE::log::warn("[FAV] '{}' ({:08X}): had no InventoryChanges entry -- "
+                                    "made one (delta 0) but the engine minted no hotkey list "
+                                    "on it (lists: {})",
+                        f.obj->GetName(), f.obj->GetFormID(),
+                        fresh->extraLists ? static_cast<int>(fresh->extraLists->size()) : 0);
+                }
             }
         }
         // GI33: the star is read back OUT of the engine once the change has
