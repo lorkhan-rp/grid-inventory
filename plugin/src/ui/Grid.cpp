@@ -820,11 +820,14 @@ namespace FUI::Grid
                 // reasoning that a plain unit owns no ExtraDataList and so a
                 // star for it has nowhere to live -- the engine writes into a
                 // variant sibling's list instead. That measurement was real,
-                // and it stopped being the whole story the day ProcessFavorites
-                // learned to LIFT every existing star before calling
-                // SetFavorite: with the entry momentarily bare, the engine
-                // mints a fresh list, and the plain pool ends up owning one
-                // like everybody else. The line outlived the problem.
+                // and it stopped being the whole story once ProcessFavorites
+                // learned to HIDE the entry's lists for the SetFavorite call
+                // (GI81): with the entry genuinely bare, the engine mints a
+                // fresh list, and the plain pool ends up owning one like
+                // everybody else. (Lifting the STARS first, which is what this
+                // comment used to credit, never did that -- the engine reads
+                // the lists, not the stars; that is the bug GI81 fixed.) The
+                // line outlived the problem.
                 //
                 // What it cost while it stayed: star the tempered sword and the
                 // plain one lit up beside it, because "any star on this entry"
@@ -9290,8 +9293,9 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
     //
     // The one thing only the engine can do is favourite a unit that owns NO
     // list, because that unit has to be split off the stack first -- and it
-    // refuses to split while the entry already carries a hotkey. So lift the
-    // other hotkeys for the duration of that one call and put them straight back.
+    // only splits for an entry that has no lists at all. So the entry's lists
+    // are hidden from it for the duration of that one call (GI81, in
+    // ProcessFavorites) and the list it mints is spliced back in.
     // ★The doll's and the drawer's way in. A board tile has a key and a list
     // index; a WORN unit has neither -- it owns no cell, and its position in
     // the entry shifts every time something is equipped. uid+sig names it
@@ -9394,11 +9398,12 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     // A toggle that cannot be untoggled is the one outcome worth
                     // avoiding here.
                     // ★This is now the rare path, not the plain pool's normal
-                    // one: lifting the other stars before SetFavorite gets the
-                    // engine to mint a list for a plain unit too, so it usually
-                    // owns one and takes the precise branch below. Reached only
-                    // when that failed -- and then we do not know which list
-                    // holds this pool's mark, so coarse is the honest answer.
+                    // one: hiding the entry's lists from SetFavorite (GI81,
+                    // below) gets the engine to mint a list for a plain unit
+                    // too, so it usually owns one and takes the precise branch.
+                    // Reached only when that failed -- and then we do not know
+                    // which list holds this pool's mark, so coarse is the honest
+                    // answer.
                     std::vector<std::string> all;
                     if (entry->extraLists) {
                         for (auto* x : *entry->extraLists) {
@@ -9412,46 +9417,67 @@ std::function<void(RE::TESBoundObject*, int, RE::ExtraDataList*)> g_dropWorld;
                     xl->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
                 } else {
                     // No list of its own, and the pool has no star anywhere else.
-                    // Only the engine can split the unit off the stack, and it
-                    // refuses while the entry already carries a hotkey -- so lift
-                    // the others across the call.
-                    std::vector<std::string> lifted;
-                    if (entry->extraLists) {
-                        for (auto* x : *entry->extraLists) {
-                            if (x && x->HasType<RE::ExtraHotkey>()) lifted.push_back(poolOf(x));
+                    // Only the engine can split a unit off the stack, and
+                    // MEASUREMENT settled when it does: SetFavorite(entry, null)
+                    // mints a fresh list only for an entry with NO lists at all;
+                    // with even one variant present it writes the hotkey into
+                    // that variant's list instead, and calling again is refused
+                    // outright while any star exists. Lifting the other stars
+                    // across the call (what this branch did) changed nothing,
+                    // because what the engine looks at is the LISTS, not the
+                    // stars -- a torch with a stolen sibling, a potion with an
+                    // owned one, never got a list of its own, and the tile the
+                    // player pointed at stayed dark while the sibling lit up.
+                    // (Reported: "starring registers, but no star unless the
+                    // item was equipped once, or dropped and picked up" -- both
+                    // of which hand the unit a list by other means.)
+                    //
+                    // ★★GI81: SO HIDE THE LISTS. For this one call the entry's
+                    // container is detached; the engine sees the ordinary bare
+                    // entry it handles every day, mints a {Hotkey} list into a
+                    // fresh container, and that list is then spliced into the
+                    // real one. Nothing here constructs an ExtraDataList (the
+                    // library cannot, in a cross-runtime build: no ctor, and
+                    // the object's size differs by runtime) -- the engine does,
+                    // on its usual path. countDelta is untouched: lists only
+                    // partition the entry's count, and AddExtraList is a
+                    // push_front. The fresh list hashes to the plain pool
+                    // (nothing but the hotkey), which is exactly the shape the
+                    // engine mints for a bare entry, so PoolHasStar and the
+                    // untoggle path read it as they always have.
+                    // ★The one container deleted here is one the engine just
+                    // made and nothing else references; ~BSSimpleList frees its
+                    // nodes only (the payloads are pointers), and the library's
+                    // own ~InventoryEntryData deletes containers the same way.
+                    // ★Game thread only (ProcessFavorites runs on the Tick), so
+                    // nothing reads extraLists inside the window.
+                    auto* const hidden = entry->extraLists;
+                    entry->extraLists = nullptr;
+                    changes->SetFavorite(entry, nullptr);
+                    auto* const minted = entry->extraLists;
+                    entry->extraLists = hidden;
+                    int spliced = 0;
+                    if (minted && hidden) {
+                        for (auto* x : *minted) {
+                            if (!x) continue;
+                            entry->AddExtraList(x);   // into `hidden`, the real container
+                            ++spliced;
+                        }
+                        delete minted;   // nodes only -- the lists live on in `hidden`
+                    } else if (minted) {
+                        entry->extraLists = minted;   // no container before: the engine's IS it
+                        for (auto* x : *minted) {
+                            if (x) ++spliced;
                         }
                     }
-                    clearPools(lifted);
-                    // ★★SetFavorite's second parameter names the UNIT, and null
-                    // is the only honest value for a plain unit: it has no list
-                    // to point at, which is the whole reason this branch exists.
-                    // The engine then picks for itself, and MEASUREMENT settled
-                    // what it picks -- it mints a fresh list only when the entry
-                    // has none at all; with even one variant present it writes
-                    // into that variant's list instead. Calling again does not
-                    // move it along either (verified: a second call is refused
-                    // outright while any star exists).
-                    //
-                    // So there is no way to aim this call at a plain unit, and
-                    // the star it produces is ACCEPTED where it lands rather
-                    // than reverted. Reverting was tried first and it removed
-                    // the wrong thing -- it left the player unable to favourite
-                    // an ordinary dagger at all, which is worse than the star
-                    // being coarse. PoolHasStar reads any entry star as the
-                    // plain pool's, so the tile the player pointed at does light
-                    // up; its variant sibling lights up with it. Same dagger,
-                    // one mark between them.
-                    changes->SetFavorite(entry, nullptr);
-                    // Re-walk the CURRENT list and restore by POOL, so a list
-                    // the split rebuilt is matched by what it holds, not by an
-                    // address that may no longer mean anything.
-                    if (entry->extraLists && !lifted.empty()) {
-                        for (auto* x : *entry->extraLists) {
-                            if (!x || x->HasType<RE::ExtraHotkey>()) continue;
-                            if (std::find(lifted.begin(), lifted.end(), poolOf(x)) ==
-                                lifted.end()) continue;
-                            x->Add(new RE::ExtraHotkey(RE::ExtraHotkey::Hotkey::kUnbound));
-                        }
+                    if (spliced == 0) {
+                        SKSE::log::warn("[FAV] '{}': the engine minted no list for the plain "
+                                        "unit -- the star has nowhere to sit",
+                            f.obj->GetName());
+                    } else if (hidden) {
+                        SKSE::log::info("[FAV] '{}': plain unit starred on a list minted "
+                                        "behind hidden siblings ({} spliced)",
+                            f.obj->GetName(), spliced);
                     }
                 }
                 // ★Back behind the trace switch. It was unconditional while the
