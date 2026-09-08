@@ -23,6 +23,12 @@ namespace FUI
         // this suppresses OnHide's fallback so the sound doesn't double up.
         static void MarkCloseSfxPlayed();
 
+        // ★GI83: everything a close does EXCEPT the sound, callable without an
+        // instance. OnHide is the ordinary way in; the tick's orphan net is the
+        // other, for a menu the engine took off the stack without ever sending
+        // kForceHide (two reporter CTDs, see UIRoot::Tick).
+        static void CloseSession(const char* a_why);
+
         void PostDisplay() override;
         void AdvanceMovie(float a_interval, std::uint32_t a_currentTime) override;
         RE::UI_MESSAGE_RESULTS ProcessMessage(RE::UIMessage& a_message) override;
