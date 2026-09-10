@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Smooth <skypia0147-dev@users.noreply.github.com>
 // Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
 
+#pragma once
 #pragma once
 // =============================================================================
 //  Grid Inventory -- extension ABI v1
@@ -90,6 +91,56 @@ namespace GridInvAPI
     inline constexpr std::uint32_t kMsgHostReady        = 0x47494852;  // 'GIHR'
     inline constexpr std::uint32_t kMsgRegisterProvider = 0x47495250;  // 'GIRP'
     inline constexpr std::uint32_t kMsgCostumeState     = 0x47494353;  // 'GICS'
+    // ★(1.5.x) SUPPRESS THE GRID'S OWN WINDOW while yours sits over it.
+    //
+    // Sending UI_MESSAGE_TYPE::kHide to "GridInventoryMenu" does the same
+    // thing and needs no header -- that is the standard courtesy and it is
+    // answered. This message exists for the case where the intent should be
+    // unambiguous: the engine also sends kHide, so a host that wants to know
+    // the request came from a MOD rather than from the game reads this one.
+    //
+    // The grid stays OPEN throughout: its board, the item on the cursor and
+    // every sub-window survive, and IsMenuOpen() keeps answering true --
+    // it reports the SESSION, not whether the board is on screen, so it does
+    // not move when you suppress. (1.5.1 answered liveness there by mistake,
+    // which told a client its own suppression was the player closing the
+    // inventory; fixed in 1.5.2.)
+    //
+    // ★★YOU OWN THE HOLD. This message is not the same as kHide in one way
+    // that matters: the host's safety net recovers a kHide by watching the
+    // MENU STACK, and your window may not be on it at all -- an overlay
+    // drawn outside the menu system is invisible to any such test, and the
+    // net used to revoke those suppressions about a fifth of a second in.
+    // A hold taken with this message is not second-guessed that way, and the
+    // host's own kShow will not break it either.
+    //
+    // ★★AND THERE IS NO TIMER BEHIND IT. The hold does not expire. What that
+    // buys costs one obligation, and it is absolute:
+    //
+    //   RELEASE IT (suppress = 0) ON EVERY PATH THAT CLOSES YOUR WINDOW.
+    //
+    // Not just the normal one. The cancel, the error return, the hotkey that
+    // closes it, the load that happens while it is up -- every exit. While
+    // you hold this the player cannot see the inventory and cannot reach it,
+    // so a path that forgets is a soft lock, and no timer is coming: a build
+    // of this host did carry a ten-minute backstop and it was removed,
+    // because nobody sits in front of a frozen game for ten minutes. They
+    // kill the process at two.
+    //
+    // The only other things that take the hold back are the ones that end the
+    // session your window was living over anyway: our own close, a save load,
+    // and a new game.
+    //
+    // ★SEND IT WHILE THE INVENTORY IS OPEN. There is nothing to step aside
+    // from otherwise, and a hold banked against a session that has not started
+    // would surface at the next open as a board that never draws. So one taken
+    // with the inventory closed is refused, with a line in our log saying so.
+    // Check IsMenuOpen() first, or just send it when your window opens over us.
+    //
+    // ★DISPATCH FROM ANY THREAD. It is parked and applied on the next game
+    // frame, so the grid goes quiet a frame after you ask rather than inside
+    // your Dispatch call. Nothing here touches the engine on your thread.
+    inline constexpr std::uint32_t kMsgSuppressUI      = 0x47495355;  // 'GISU'
 
     // ---- limits -----------------------------------------------------------
 
@@ -210,8 +261,14 @@ namespace GridInvAPI
         // any thread; the host only sets a flag.
         void (*RequestRebuild)();
 
-        // True while the grid menu is open. A provider that mutates inventory
-        // should check this before doing anything the user could be looking at.
+        // True while the grid MENU SESSION is open: its board, the item on the
+        // cursor and every sub-window are alive. Suppression (kMsgSuppressUI)
+        // does NOT move this -- a hidden grid is still an open one, and a
+        // client reading its own suppression back as a close is what this
+        // answering liveness caused in 1.5.1. A provider that mutates
+        // inventory should check this first; the session is what makes a
+        // mutation dangerous, not whether pixels are on screen.
+        // Main/game thread only (reads RE::UI's menu map, which is unlocked).
         bool (*IsMenuOpen)();
 
         // Grant-time tile snapshot: how many grid cells `base` occupies RIGHT NOW
@@ -272,6 +329,14 @@ namespace GridInvAPI
     //  shield and a quiver -- a costume leaves all of those alone, because they
     //  are held rather than worn. Only the pieces that actually reach the body
     //  are listed here, so every entry is something the player is now seen in.
+    struct SuppressUI
+    {
+        std::uint32_t structSize;   // = sizeof(SuppressUI)
+        std::uint32_t abiVersion;   // = kABIVersion
+        std::uint32_t suppress;     // 1 = hide the grid, 0 = give it back
+    };
+    static_assert(sizeof(SuppressUI) == 12, "SuppressUI is part of the ABI");
+
     struct CostumeState
     {
         std::uint32_t  structSize;   // = sizeof(CostumeState)

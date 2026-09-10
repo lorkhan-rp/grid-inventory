@@ -15,7 +15,6 @@
 #include "ui/WinManager.h"
 #include "game/Census.h"
 #include "game/DeltaWatch.h"
-#include "game/DualRing.h"
 #include "game/Ledger.h"
 
 #include <imgui_internal.h>   // ImTextCharFromUtf8 (the tracked-title walk)
@@ -226,6 +225,60 @@ namespace FUI
         return a_default;
     }
 
+    int WinManager::ReadWheelTapMs(int a_default)
+    {
+        std::ifstream in(kUiIniPath);
+        if (!in) return a_default;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            auto key = line.substr(0, eq);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != "!wheeltapms") continue;
+            try {
+                const int v = std::stoi(line.substr(eq + 1));
+                // ★Bounded rather than trusted. Under ~60ms no human press is
+                // a tap and every hold would toggle; over ~2s a hold is being
+                // read as a tap and the wheel sticks open by surprise.
+                if (v < 60 || v > 2000) return a_default;
+                return v;
+            } catch (...) {
+                return a_default;
+            }
+        }
+        return a_default;
+    }
+
+    std::uint32_t WinManager::ReadWheelKey(bool a_pad)
+    {
+        // Same shape and the same reason as ReadWheelEnabled: the hotkey has to
+        // be right before the first press, which is long before any window
+        // exists to load the rest of this file.
+        const char* want = a_pad ? "!wheelkeypad" : "!wheelkey";
+        std::ifstream in(kUiIniPath);
+        if (!in) return 0;
+        std::string line;
+        while (std::getline(in, line)) {
+            const auto eq = line.find('=');
+            if (eq == std::string::npos) continue;
+            auto key = line.substr(0, eq);
+            while (!key.empty() && (key.back() == ' ' || key.back() == '\t')) key.pop_back();
+            if (key != want) continue;
+            try {
+                const int v = std::stoi(line.substr(eq + 1));
+                // Negative is nonsense and 0xFF is the engine's "not bound" --
+                // either would bind the wheel to nothing, which is worse than
+                // following the game.
+                if (v <= 0 || v == 0xFF) return 0;
+                return static_cast<std::uint32_t>(v);
+            } catch (...) {
+                return 0;
+            }
+        }
+        return 0;
+    }
+
     void WinManager::Load()
     {
         m_loaded = true;
@@ -278,6 +331,15 @@ namespace FUI
                 try { Theme::SetScaleSetting(std::stof(rest)); } catch (...) {}
                 continue;
             }
+            // ★The text-size multiplier, beside the display scale it
+            // multiplies. Nothing is baked from it -- it is read every frame by
+            // style.FontScaleMain and by Theme::SnapPx -- so arriving late
+            // would cost nothing; it is here because this is where the other
+            // half of the same number lives.
+            if (key == "!fontscale") {
+                try { Theme::SetFontScale(std::stof(rest)); } catch (...) {}
+                continue;
+            }
             // ★1.0.5: global capture-lamp offset, "az, el" in degrees. Loaded
             // BEFORE any icon is asked for, because it is part of every cache
             // key — reading it late would serve one frame of icons keyed on the
@@ -324,6 +386,11 @@ namespace FUI
                 Grid::SetPoolTrace(rest == "1" || rest == "true");
                 continue;
             }
+            // EDIT / SETTINGS window fit report -- see Grid::FitTrace
+            if (key == "!fittrace") {
+                Grid::SetFitTrace(rest == "1" || rest == "true");
+                continue;
+            }
             // 1.4 / B0: engine-delta observation. Writes a lot and changes
             // nothing -- see DeltaWatch.h.
             if (key == "!delta") {
@@ -337,12 +404,19 @@ namespace FUI
                 Census::SetEnabled(rest == "1" || rest == "true");
                 continue;
             }
-            // Carrier biped slot pin (editor 44..60) -- see DualRing.h. A
-            // modlist fact, so it is the player's line to write.
-            if (key == "!ring2slot") {
-                try { DualRing::SetSlotOverride(std::stoi(rest)); } catch (...) {}
+            // Post-load icon warm-up (first-open latency). ON by default;
+            // this is the escape hatch for machines where any background
+            // I/O after a load is unwelcome ("!warmicons = 0").
+            if (key == "!warmicons") {
+                IconCache::GetSingleton()->SetWarmEnabled(
+                    rest == "1" || rest == "true");
                 continue;
             }
+            // ★"!ring2slot" was the second-ring carrier's biped-slot pin,
+            // retired with the carrier in 1.6.0. No handler is needed to drop
+            // it: an unrecognised "!" key falls through to the window-geometry
+            // parse below, which fails on a bare number and skips the line --
+            // and the next settings write leaves it out for good.
             // Scancode that hands a screen to the engine and back -- a
             // diagnostic, so it ships unassigned. 87 = 0x57 = F11. See
             // UIRoot::SetVanillaKey.
@@ -356,6 +430,11 @@ namespace FUI
                 Equip::SetDrawerOpen(rest == "1" || rest == "true");
                 continue;
             }
+            // Test switch, not a setting: see UIRoot::SetNpcVanilla.
+            if (key == "!npcvanilla") {
+                UIRoot::SetNpcVanilla(rest == "1" || rest == "true");
+                continue;
+            }
             // Test switch, not a setting: see Grid::SetRebuildDrop.
             if (key == "!rbdrop") {
                 Grid::SetRebuildDrop(rest.c_str());
@@ -364,6 +443,19 @@ namespace FUI
             // 1.4 / B3-c: where do rebuilds come from.
             if (key == "!rbtrace") {
                 Grid::SetRebuildTrace(rest == "1" || rest == "true");
+                continue;
+            }
+            // ★W3: carry-weight bonus -> extra cells. Three values: CW per
+            // cell (0 = off), baseline (0 = auto: the race's own base), max
+            // bonus cells.
+            if (key == "!cwcells") {
+                int v[3] = { 10, 0, 50 };
+                int n = 0;
+                std::istringstream vs(rest);
+                for (std::string tok; n < 3 && std::getline(vs, tok, ','); ++n) {
+                    try { v[n] = std::stoi(tok); } catch (...) {}
+                }
+                Grid::SetCwCells(v[0], v[1], v[2]);
                 continue;
             }
             // Request ledger -- ON BY DEFAULT since its promotion to permanent
@@ -504,6 +596,24 @@ namespace FUI
                 try { Wheeler::SetEnabled(std::stoi(rest) != 0); } catch (...) {}
                 continue;
             }
+            // ★The wheel's own key. Re-applied on every load precisely BECAUSE
+            // this file is re-read on every inventory open: the override has to
+            // outlive that, or the game's Favourites binding takes the wheel
+            // back the first time the player opens a bag.
+            if (key == "!wheeltapms") {
+                try { Wheeler::SetTapMs(std::stoi(rest)); } catch (...) {}
+                continue;
+            }
+            if (key == "!wheelkey" || key == "!wheelkeypad") {
+                const bool pad = key == "!wheelkeypad";
+                try {
+                    const int v = std::stoi(rest);
+                    Wheeler::SetKeyOverride(
+                        pad, (v > 0 && v != 0xFF) ? static_cast<std::uint32_t>(v) : 0u);
+                } catch (...) {}
+                Wheeler::AdoptFavoritesKey();   // resolve it now, either way
+                continue;
+            }
             if (key == "!merchgoldinf") {   // F3: unlimited merchant gold
                 try { LootBarter::SetMerchantGoldInfinite(std::stoi(rest) != 0); } catch (...) {}
                 continue;
@@ -601,6 +711,7 @@ namespace FUI
         out << "; 상인 옵션(무한 골드·전 품목 매입)은 함께 저장됩니다.\n";
         out << "; Merchant options (unlimited gold / buys anything) DO travel.\n";
         out << "!scale = " << Theme::ScaleSetting() << "\n";
+        out << "!fontscale = " << Theme::FontScale() << "\n";
         out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         // ★★The capture light MUST travel with a preset, and not because it is
         // part of the look: the preset ships the author's icon pak, and every
@@ -676,6 +787,7 @@ namespace FUI
                     else if (key == "!cellscale") Theme::SetScaleSetting(   // old units
                                                       std::stof(rest) / Theme::kScaleBase);
                     else if (key == "!scale")     Theme::SetScaleSetting(std::stof(rest));
+                    else if (key == "!fontscale") Theme::SetFontScale(std::stof(rest));
                     else if (key == "!skin")      Theme::SetSkinLegacy(std::stoi(rest));
                     else if (key == "!skin2")     Theme::SetSkinLegacy2(std::stoi(rest));
                     else if (key == "!skin3")     Theme::SetSkinByName(rest.c_str());
@@ -822,12 +934,14 @@ namespace FUI
         // ★NOT in ExportPreset: a preset never carries window layout.
         out << "!uiscale = " << Theme::Scale() << "\n";
         out << "!scale = " << Theme::ScaleSetting() << "\n";
+        out << "!fontscale = " << Theme::FontScale() << "\n";
         out << "!skin3 = " << Theme::SkinNameAt(Theme::SkinIndex()) << "\n";
         out << "!lang = " << Lang::Id(Lang::Get()) << "\n";
         // Diagnostic / test switches survive a restart once turned on --
         // a tester should not have to re-arm them every session. Written
         // only while ON, so an ordinary install never carries them.
         if (Grid::PoolTrace()) out << "!pooltrace = 1\n";
+        if (Grid::FitTrace())  out << "!fittrace = 1\n";
         if (Grid::SimDrift())  out << "!simdrift = 1\n";
         if (DeltaWatch::Enabled()) out << "!delta = 1\n";
         // ★Inverted since their promotions: ON is the default, so the line is
@@ -837,14 +951,19 @@ namespace FUI
         if (!Ledger::Enabled())    out << "!ledger = 0\n";
         // Lorkhan : ecrit UNIQUEMENT quand on rend la pause (defaut = sans).
         if (!GridInventoryMenu::NoPauseEnabled()) out << "!nopause = 0\n";
-        if (DualRing::SlotOverride() >= 0) {
-            out << "!ring2slot = " << DualRing::SlotOverride() << "\n";
-        }
+        if (!IconCache::GetSingleton()->WarmEnabled()) out << "!warmicons = 0\n";
         if (UIRoot::VanillaKey() != 0) {
             out << "!vanillakey = " << UIRoot::VanillaKey() << "\n";
         }
         if (Equip::DrawerOpen())   out << "!accdrawer = 1\n";
         if (Grid::RebuildTrace())  out << "!rbtrace = 1\n";
+        if (UIRoot::NpcVanilla())  out << "!npcvanilla = 1\n";
+        // Carry Weight bonus -> extra inventory cells
+        // 소지 중량 보너스의 칸 환전
+        out << "; !cwcells = CW per cell (0 = off), baseline (0 = auto: race base), max bonus cells\n";
+        out << "; !cwcells = 칸당 CW (0 = 끔), 기준선 (0 = 자동: 종족 기본치), 보너스 칸 상한\n";
+        out << "!cwcells = " << Grid::CwPerCell() << ", " << Grid::CwBase()
+            << ", " << Grid::CwMaxCells() << "\n";
         out << "; !caplight = capture lamp offset in degrees (az, el)\n";
         out << "!caplight = " << Theme::CaptureLightAz()
             << ", " << Theme::CaptureLightEl() << "\n";
@@ -857,9 +976,32 @@ namespace FUI
         out << "!wheelon = " << (Wheeler::Enabled() ? 1 : 0) << "\n";
         out << "!merchgoldinf = " << (LootBarter::MerchantGoldInfinite() ? 1 : 0) << "\n";
         out << "!merchbuyall = " << (LootBarter::MerchantBuysAll() ? 1 : 0) << "\n";
-        // ★No wheel hotkey written any more -- see the reader above. It lives
-        // in the game's own controls, and writing a second copy here is what
-        // let an old value climb back in.
+        // ★The wheel's key: the OVERRIDE, never the resolved value. Writing
+        // what the wheel is currently on is what let an old number climb back
+        // over the player's rebind, which is why the previous entry was
+        // removed. This one is only ever what the player typed here.
+        out << "\n";
+        out << "; Wheel hotkey. 0 = follow the game's Favourites binding (default).\n";
+        out << ";   Set a DirectInput scan code to give the wheel a key of its own --\n";
+        out << ";   needed if you put Inventory on the Favourites key, since the wheel\n";
+        out << ";   hides that key from the game and the bag would never open.\n";
+        out << ";   Common codes: Q=16 E=18 R=19 F=33 G=34 V=47 X=45 Z=44 CapsLock=58\n";
+        out << "; 휠 단축키. 0이면 게임의 즐겨찾기 키를 따라갑니다 (기본값).\n";
+        out << ";   DirectInput 스캔 코드를 넣으면 휠이 그 키를 씁니다. 즐겨찾기 키에\n";
+        out << ";   인벤토리를 배정했다면 반드시 옮겨야 합니다 -- 휠이 그 키를 게임에서\n";
+        out << ";   감추기 때문에 가방이 아예 열리지 않습니다.\n";
+        out << ";   자주 쓰는 코드: Q=16 E=18 R=19 F=33 G=34 V=47 X=45 Z=44 CapsLock=58\n";
+        out << "!wheelkey = " << Wheeler::KeyOverride(false) << "\n";
+        out << "; Gamepad button, same rule. 0 = follow the game.\n";
+        out << "; 게임패드 버튼, 규칙 동일. 0이면 게임을 따라갑니다.\n";
+        out << "!wheelkeypad = " << Wheeler::KeyOverride(true) << "\n";
+        out << "; A press SHORTER than this is a tap: the wheel stays open until\n";
+        out << ";   you press again. Longer is the hold it always was -- let go\n";
+        out << ";   and it applies. Milliseconds, 60 to 2000.\n";
+        out << "; 이 시간보다 짧게 누르면 탭입니다. 다시 누를 때까지 휠이\n";
+        out << ";   열린 채로 있습니다. 그보다 길면 종전과 같습니다 -- 놓는 순간\n";
+        out << ";   적용됩니다. 밀리초 단위, 60~2000.\n";
+        out << "!wheeltapms = " << Wheeler::TapMs() << "\n\n";
         for (const auto& w : m_wins) {
             if (!w.posKnown) continue;
             out << w.key << " = "
@@ -1357,10 +1499,12 @@ namespace FUI
         // title: tracked uppercase
         ImFont* font = ImGui::GetFont();
         // whole pixels only — a fractional size bakes its own face (rule 102)
-        // ★DESIGN UNITS. SnapPx applies the scale itself — passing
-        // titleSize*S asked for 24·S², which at 4K is a 54px name in a
-        // 51px bar (Theme::SnapAbs).
-        const float fontSize = Theme::SnapPx(sk.titleSize);
+        // ★DESIGN UNITS, applied by the helper — passing titleSize*S asked
+        // for 24·S², which at 4K is a 54px name in a 51px bar.
+        // ★★Theme::FontTitle, not SnapPx: the title is the one string the
+        // text-size setting leaves alone, because TitleBarH below it is
+        // layout and does not grow. The reason lives with the helper.
+        const float fontSize = Theme::FontTitle();
         const float spacing = sk.titleSpacing * S;
         // tornFrame: nudge the title in so it clears the ragged frame edge
         const float insX = Theme::FrameInsetX();

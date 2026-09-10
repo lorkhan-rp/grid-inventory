@@ -6,9 +6,11 @@
 
 #include <source_location>
 
+#include "game/Lotd.h"
 #include "ui/ItemDef.h"
 #include "ui/Lang.h"
 #include "ui/Theme.h"
+#include "ui/UnitRef.h"
 
 #include <functional>
 #include <string>
@@ -56,6 +58,12 @@ namespace FUI::Grid
     // ...and read back, so the ini writer can keep a switch the tester
     // turned on across a restart instead of making them set it every time.
     [[nodiscard]] bool PoolTrace();
+    // ★(1.5.x) `!fittrace = 1` -- the EDIT / SETTINGS window fit report. Says
+    // what the content measured, what the window asked for, and whether the
+    // screen clamp cut it off. Exists because a scrollbar in those windows was
+    // diagnosed twice from arithmetic and twice wrongly; the numbers settle it.
+    [[nodiscard]] bool FitTrace();
+    void SetFitTrace(bool a_on);
     [[nodiscard]] bool SimDrift();
 
     // ★Tile keys of the coin pouches on the board right now, front cell
@@ -64,6 +72,26 @@ namespace FUI::Grid
     // returning (or pre-1.3.0) amount belongs to.
     [[nodiscard]] std::vector<std::string> PouchTiles();
     [[nodiscard]] std::string              AnyPouchTile();
+    // ★Order the given tile keys by BOARD POSITION: main board first, then
+    // bags (row-major within each); keys with no layout entry sort last.
+    // GoldCoins' pinned-purse trim walks the result back-to-front, so the
+    // purse that pays for an over-spend is the rear-most one -- the same
+    // "the rear tiles absorb the spend" rule the auto coin partition already
+    // follows. Main thread only (reads the layout).
+    [[nodiscard]] std::vector<std::string> OrderKeysByPosition(
+        std::vector<std::string> a_keys);
+    // ★Every COIN tile's slot (key + the amount it holds), in board-position
+    // order -- what the spend allocator needs to decide WHO pays for an
+    // external gold drop (shop, trainer, script). Pouch tiles are excluded
+    // (the pouch is storage, not spending money) and so is the tile on the
+    // cursor (money mid-carry cannot be the one a shop consumed). Read from
+    // the layout, so it answers with the menu closed too. Main thread only.
+    struct CoinSlot
+    {
+        std::string key;
+        int         value = 0;
+    };
+    [[nodiscard]] std::vector<CoinSlot> CoinTilesByPosition();
     // ★(1.3.0) hand any waiting return to the pouch tiles, NEW tiles first
     // (the pouch that just walked in claims its own gold before any
     // pre-existing empty pouch gets a look). Called on every rebuild.
@@ -86,6 +114,11 @@ namespace FUI::Grid
     // for square footprints, where pressing them does nothing.
     [[nodiscard]] bool HeldCanRotate();
 
+    // ★Is the cursor over the player's own board or a bag window this frame?
+    // Asked by the container's take-all, which must not fire where R already
+    // means "drop one".
+    [[nodiscard]] bool PlayerBoardHovered();
+
     // GI63: what the tooltip is describing THIS FRAME, for the prompt bar.
     // ★Recorded by DrawItemTooltip, which every board shares (grid, doll,
     // partner), so the bar needs to know nothing about who is hovering what.
@@ -107,6 +140,10 @@ namespace FUI::Grid
                                   // steal / plant / withdraw / unequip
         bool canRecharge = false; // T feeds it a soul gem (enchanted weapon,
                                   // not already full, not the partner's)
+        // ★(1.5.0) shelf USE MODE: a container's book reads in place with
+        // Shift+right-click -- the bar says so while one is hovered
+        bool      canShelfUse = false;
+        Lang::Str useVerb{};
     };
     [[nodiscard]] HoverPrompt HoveredPrompt();
     void CancelHold();
@@ -115,12 +152,6 @@ namespace FUI::Grid
     // held item isn't from a partner). The partner window hides it so its source
     // cell reads as empty while carried.
     [[nodiscard]] RE::TESBoundObject* HeldPartnerObject();
-
-    // ★B4-4: is a CARRIER carry up -- the displaced second ring riding the
-    // cursor? The quiet ring-swap handoff keys its "no redraw needed" on
-    // exactly this: the drop path starts that carry before Wear runs, the
-    // right-click router displaces with no carry at all.
-    [[nodiscard]] bool CarrierCarryActive();
 
     // GI17: the same question narrowed to ONE sub-stack. Partner windows must
     // use this -- with several cells per form, the form-level test hides them
@@ -148,6 +179,15 @@ namespace FUI::Grid
     // grid's drop ghost / drop-cell math. False when nothing is carried.
     bool HeldFootprint(int& a_w, int& a_h, float& a_offX, float& a_offY);
 
+    // ★GI71b: the carried FOOTPRINT, not just its bounding box. HeldFootprint
+    // hands out w/h, which is all a rectangle ever needed -- and it is why the
+    // partner board's drop ghost stayed a rectangle after its tiles learned to
+    // be L-shaped: the shape was there, the accessor simply could not say it.
+    // The player's own grid has always drawn its ghost from the mask; this is
+    // how the other board reads the same thing.
+    // Null when nothing is carried. Valid only for the current frame.
+    [[nodiscard]] const FUI::Shape* HeldShape();
+
     // v9.2: start carrying an item that is NOT in the grid (equipment doll
     // pickup — the unequip runs deferred, the carry starts immediately).
     // GI25: a_uid/a_sig identify the sub-stack being lifted (the doll's pickup
@@ -158,12 +198,9 @@ namespace FUI::Grid
     // a_count: how many units ride the cursor. One for anything worn a copy at
     // a time — but a quiver is unequipped whole, so the carry has to be whole
     // too, or the rest of it lands in the pack the instant it comes off.
-    // a_fromCarrier: lifted from the SECOND ring slot -- never engine-worn,
-    // so the carry must not claim a worn list (see Held::fromCarrier).
-    void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid = 0,
-                    std::uint16_t a_sig = 0, int a_hand = 0,
-                    bool a_swappedOut = false, int a_count = 1,
-                    bool a_fromCarrier = false);
+    void BeginCarry(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                    std::uint16_t a_sig, int a_hand = 0,
+                    bool a_swappedOut = false, int a_count = 1);
 
     // Phase 5-B: carry a PARTNER (merchant/container) item on the cursor.
     // Dropping it onto the player grid takes (loot) or buys (barter).
@@ -174,10 +211,13 @@ namespace FUI::Grid
     // take/buy moves THAT unit and not whichever one the engine fancies.
     // GI62: a_rot = the quarter-turn the cell sits at on the partner board, so
     // the carry (and any drop back into the inventory) keeps it.
+    // ★a_unit.sig is carried but NOT YET READ by the body -- this call has
+    // never had a signature to work with, and giving it one is a behaviour
+    // change that wants its own round. The field being there is the point: the
+    // gap is visible now instead of implied by an argument that is missing.
     void BeginPartnerCarry(RE::TESBoundObject* a_obj, int a_count, int a_value,
-                           float a_offX = -1.0f, float a_offY = -1.0f,
-                           std::uint16_t a_uid = 0, int a_xlIdx = -1, int a_ord = 0,
-                           int a_rot = 0);
+                           const UnitRef& a_unit, int a_ord = 0, int a_rot = 0,
+                           float a_offX = -1.0f, float a_offY = -1.0f);
 
     // Deferred rebuild (safe to request mid-draw; runs at FinishFrame).
     // ★B3-c: who asked, without touching thirty call sites. Before the board
@@ -246,11 +286,42 @@ namespace FUI::Grid
                           std::uint16_t a_sig, int a_hand = 0,
                           const std::string& a_srcKey = {}, int a_units = 1,
                           int a_xlIdx = -1);
+
+    // ★★★THE UNIT COMING BACK, NAMED WHILE WE CAN STILL SEE IT.
+    //
+    // NotePendingEquip's mirror. That one says "this unit is LEAVING the
+    // board"; this one says "this unit is ARRIVING on it, and here is what it
+    // is" -- recorded by the action that displaces it, before the engine has
+    // moved anything.
+    //
+    // ★Why it has to be recorded rather than derived: OnFormDelta is an
+    // ENGINE-EVENT applier. The event carries a FormID and nothing else
+    // ("uniqueID is always zero, so it never names the unit"), so the board
+    // re-walks the form and works out what is new -- which is the right answer
+    // for a script, another mod, or the engine's own slot-conflict removal,
+    // and the WRONG one when the player just told us exactly what they did.
+    // Measured 2026-09-01: right-clicking a plain dagger displaced the TEMPERED
+    // one, the re-walk named the returning unit `sig 0000`, and every dagger on
+    // the board went on to read "Iron Dagger" -- the tempered one included.
+    //
+    // ★★Consumed by the next partial add for this form, and only when that add
+    // has exactly ONE fresh tile: one note, one arrival, no guessing. Anything
+    // else drops the note and lets the re-walk stay the authority -- a wrong
+    // name is worse than an ugly one (the rule SoleUnitEntry already follows).
+    void NoteReturningUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
+                           std::uint16_t a_sig);
     // Right-click on a book or note: show it in the game's OWN Book Menu.
     // Queued here, opened on the Tick — the menu must not be raised from
     // inside the render pass. While it is up, UIRoot stands down completely
     // (no draw, no input) so the book is visible and closable.
     void RequestBookRead(RE::TESObjectBOOK* a_book, std::uint16_t a_uid, std::uint16_t a_sig);
+    // ★(1.5.x) a SHELF book (not owned): raise the page in place -- no
+    // engine Use, which needs the player's own copy.
+    // ★GI79: a_owner names the container holding the book (0 = the player), so
+    // the page can reach the unit's own ExtraDataList and the quest that fills
+    // its <Alias=...> tokens.
+    void RequestShelfBookPage(RE::TESObjectBOOK* a_book, std::uint16_t a_uid,
+                              std::uint16_t a_sig, RE::FormID a_owner = 0);
     void ProcessBookRead();   // UIRoot::Tick
 
     // GI32: apply queued favourite toggles. MUST run on the game thread --
@@ -259,8 +330,20 @@ namespace FUI::Grid
     void ProcessFavorites();
     // Queue one unit's favourite toggle, named by uid+sig rather than by a
     // board position -- what the equipment doll and the accessory drawer have.
+    // The request is WORN by definition (that is the only unit those two
+    // show); the hand tells a copy in each fist apart.
     void ToggleFavoriteUnit(RE::TESBoundObject* a_obj, std::uint16_t a_uid,
-                            std::uint16_t a_sig, int a_xlIdx = -1);
+                            std::uint16_t a_sig, int a_hand = 0);
+    // Retire a phantom {Hotkey}-only list left behind by the pre-fix doll
+    // favorite (one item, two lists, two tiles). Runs at menu open; the
+    // star moves back onto a real unit. See the definition for the full
+    // pathology.
+    void HealPhantomHotkeyLists();
+    // ★B3: did a CLICK already take this form's tile off the board? The equip
+    // event sink asks before deciding what a declined partial update means --
+    // an equip from the wheel, a hotkey or a script has no click behind it and
+    // therefore nothing that removed the tile. Claiming clears the record.
+    [[nodiscard]] bool ClaimOptimisticRemove(RE::FormID a_form);
     void ClearPendingEquips();   // menu close / reset
     // ★A confirmed CONSUME releases its suppression entry at once. The entry
     // used to die only at the end of the rebuild it covered, and by then the
@@ -330,6 +413,14 @@ namespace FUI::Grid
     [[nodiscard]] bool IsOverloaded();   // S2 reads this for the crimson space value
     void MarkCapacityDirty();            // inventory/equip/loadout changed — recompute
     void CapacityTick();                 // per-frame: recompute when dirty + enforce CW
+    // ★W3: carry-weight bonus -> owned cells past the hard board. Settings
+    // (!cwcells = perCell, baseline, maxCells; perCell 0 = off) + the live
+    // bonus for the panel.
+    void SetCwCells(int a_perCell, int a_base, int a_maxCells);
+    [[nodiscard]] int CwPerCell();
+    [[nodiscard]] int CwBase();
+    [[nodiscard]] int CwMaxCells();
+    [[nodiscard]] int CwBonusCells();
 
     // S2: stats panel "Space X / Y" — used cells on the main board (from the
     // last Rebuild; can exceed the total while overloaded) and the hard cap.
@@ -344,16 +435,30 @@ namespace FUI::Grid
     // coin tile is converted whole-to-pin before the split (siblings untouched).
     void PickupPartial(RE::TESBoundObject* a_obj, int a_count,
                        const std::string& a_srcKey, int a_srcTotal = 0);
+    // ★(1.5.x stack flow) drop a_count units of ONE tile into the world -- the
+    // hand behind R's quantity window. R itself still drops a single unit
+    // outright when the tile holds one; a stack asks first (see kDrop), and
+    // the confirmed number comes back here. Silent on a key that no longer
+    // names a tile: the board can be rebuilt between the ask and the answer.
+    void DropTileUnits(const std::string& a_key, int a_count);
 
     // Draw the main tetris grid inside the current ImGui window.
     void Draw();
 
     [[nodiscard]] int GoldAmount();   // v9: UIRoot draws the GOLD bar
 
-    // B: report gold spent by a barter purchase this frame. The next Rebuild's
-    // spill pass adds back the coin tiles the payment dissolved, so the bought
-    // item spills into a bag instead of reusing the freed cells.
-    void NotePaidGold(int a_price);
+    // ★S-G: gold's only mechanisms, called from GoldCoins::Tick (main
+    // thread). The ledger moved, so the coin TILES move -- income fills the
+    // rear-most partial tile and mints capfuls; a spend debits partials
+    // before full thousands, rear board position first. CoinCensus squares
+    // the one invariant that replaced the mirror (Σ tiles == ledger − pouch)
+    // whenever nothing of ours is in flight.
+    void CoinIncome(int a_value);
+    void CoinSpend(int a_value);
+    void CoinCensus(const char* a_why);
+
+    // ★S-G: NotePaidGold is retired -- a payment debits named coin tiles
+    // (Grid::CoinSpend), so the spill pass no longer guesses at freed cells.
 
     // Phase 7: sold/stored units whose engine removal is still queued on the
     // transfer Tick. The rebuild subtracts them immediately and drains the
@@ -373,13 +478,6 @@ namespace FUI::Grid
     // The layout half is ForgetTile's, called by rule 13 at the same site.
     void DropTileDisplay(const std::string& a_key, RE::TESBoundObject* a_obj);
 
-    // ★B4-4: a carrier-route equip LANDS at DualRing::Wear -- no engine equip
-    // event will ever come for the ring itself, so nothing else can retire
-    // its equip-queue entry. Left in the books, the entries a swap spam piles
-    // up each kept excluding one unit of the form until the TTL swept them,
-    // and an innocent same-form spare in the pack blinked (user report).
-    // Retires the oldest arriving entry of the form.
-    void ReleasePendingEquipFor(RE::FormID a_form);
     // B2: expire the partner-drop placement hint (qty slider cancelled/closed)
     void ClearDropHint();
 
@@ -444,15 +542,18 @@ namespace FUI::Grid
     // divider" cannot work for a mark that snaps to whole pixels.
     void DrawInkLattice(ImDrawList* a_dl, const ImVec2& a_base, int a_cols, int a_rows);
 
-    void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count, int a_coinValue = -1,
-                         int a_price = -1, bool a_isBuy = false,
+    // ★★★WHICH UNIT IS BEING DESCRIBED -- ahead of everything optional, so
+    // it cannot be forgotten. It was four loose arguments in the middle of
+    // eleven, and the player's own grid passed a literal 0 where it held the
+    // signature: every plain dagger then borrowed the tempered one's NAME while
+    // the numbers beside it stayed right (2026-09-01). a_unit.hand carries what
+    // kWorn needs -- with a copy in each hand "the worn list of this form" is
+    // ambiguous, and the doll knows which slot it drew.
+    void DrawItemTooltip(RE::TESBoundObject* a_obj, int a_count,
+                         const UnitRef& a_unit, ExtraScope a_scope,
+                         int a_coinValue = -1, int a_price = -1,
+                         bool a_isBuy = false,
                          RE::TESObjectREFR* a_owner = nullptr,
-                         ExtraScope a_scope = ExtraScope::kAny,
-                         std::uint16_t a_uid = 0, int a_xlIdx = -1,
-                         // kWorn only: WHICH worn unit. With one copy in each
-                         // hand "the worn list of this form" is ambiguous, so the
-                         // doll passes the identity its slot recorded.
-                         std::uint16_t a_sig = 0, int a_hand = 0,
                          const TileContext& a_tile = {});
 
     // ★An item's name as the GAME would print it. Quest items name themselves
@@ -556,8 +657,15 @@ namespace FUI::Grid
     // its own ground. It also costs two triangles.
     //
     // Drawn once per ITEM at the footprint's top-right, not per cell.
+    // ★a_relic (1.4.4) rides the same wedge, and says ONE thing: the museum
+    // still wants this. An owed relic takes the colour outright -- even with no
+    // rarity of its own -- and a donated one hands the wedge straight back to
+    // the item's own rarity, or to nothing at all if it has none. There is no
+    // "already donated" colour; that was tried and removed. Full reasoning at
+    // the implementation.
     void DrawRarityWedge(ImDrawList* a_dl, const ImVec2& a_boxMin,
-                         const ImVec2& a_boxMax, std::uint8_t a_haloBits);
+                         const ImVec2& a_boxMax, std::uint8_t a_haloBits,
+                         Lotd::Status a_relic);
 
     // Rarity glow, shared with the partner (loot/barter) window so its items
     // glow exactly like the player grid's.
@@ -601,22 +709,11 @@ namespace FUI::Grid
                 a_armo->HasKeywordID(kClothingRing));
     }
 
-    // GI1: one entry's units, in a stable order, each bound to the sub-stack it
-    // belongs to. uid = ExtraUniqueID (0 when the engine assigned none),
-    // xlIdx = position in entry->extraLists (-1 = a plain unit with no list).
-    struct UnitRef
-    {
-        std::uint16_t uid = 0;     // ExtraUniqueID, 0 = the engine assigned none
-        std::uint16_t sig = 0;     // GI14 content signature, 0 = a plain unit
-        int           xlIdx = -1;  // position in entry->extraLists, -1 = plain
-        // GI41: what the WALK knew and used to throw away. Asking again later
-        // means asking by xlIdx, and a position stops being true the moment a
-        // list is added or removed -- planting an item on a pickpocket mark
-        // moved the "worn" answer onto a different cell, so the lock jumped to
-        // an item the target was not wearing. Carry it instead.
-        bool          worn = false;
-        int           hand = 0;    // 1 right, 2 left (0 = not worn)
-    };
+    // GI1: one entry's units, in a stable order, each bound to the sub-stack
+    // it belongs to. ★The type itself lives in ui/UnitRef.h now -- the
+    // transfer and trade calls need to name a unit too, and one shared type
+    // is the point. Aliased so `Grid::UnitRef` keeps meaning what it meant.
+    using UnitRef = FUI::UnitRef;
 
     // Walk an entry into per-unit refs. a_skipWorn=false keeps the body-worn
     // unit (corpses and pickpocket targets show what the NPC wears).
@@ -789,6 +886,13 @@ namespace FUI::Grid
     // occupy no board space; deletion is confirmed when the window (or the
     // whole menu) closes, oldest-first when the board needs room (FIFO).
     [[nodiscard]] bool IsTrashOpen();
+
+    // ★Is one of the player's own surfaces currently ASKING something -- the
+    // trash confirm, the pouch withdraw, the recharge picker? Asked by the
+    // container's take-all, which must not fire past a question. This is the
+    // companion to PlayerBoardHovered: boards answer by hover, questions
+    // answer by being open at all.
+    [[nodiscard]] bool PlayerPopupOpen();
     void ToggleTrash();          // the trash-can button
     bool CloseTrash();           // I/ESC layering: confirm-all + close if open
     // ---- find by name -------------------------------------------------------

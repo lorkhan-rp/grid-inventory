@@ -7,12 +7,13 @@
 #include "game/BagFilter.h"
 #include "game/Census.h"
 #include "game/Costume.h"
+#include "game/DualRing.h"
 #include "game/DeltaWatch.h"
 #include "net/ShellBridge.h"
 #include "game/Ledger.h"
 #include "game/WornLedger.h"
-#include "game/DualRing.h"
 #include "game/GoldCoins.h"
+#include "game/Lotd.h"
 #include "ui/Editor.h"
 #include "ui/Fallback.h"
 #include "ui/Lang.h"
@@ -30,6 +31,7 @@
 #include <cmath>
 #include <cstdio>
 
+#include <filesystem>
 #include <fstream>
 #include <string>
 #include <unordered_map>
@@ -54,7 +56,8 @@ namespace
     std::string_view g_echoMenu{};
     bool g_pendingPartnerOpen = false; // open our grid once Container/BarterMenu fully closed (loot/barter)
     bool g_movementOff = false;        // we disabled the movement handler (text input)
-    bool g_reopenAfterMsg = false;     // we stepped aside for a MessageBox (poison confirm)
+    // (g_reopenAfterMsg retired: stepping aside is suppression now, and a
+    //  suppressed menu needs no reopening -- see HandleOverlayAside)
 
     // ★★★HOP TO THE VANILLA INVENTORY AND BACK, WITHOUT LEAVING THE GAME.
     //
@@ -168,6 +171,17 @@ namespace
                 }
                 if (auto* base = a_object->GetBaseObject();
                     base && !FUI::Grid::CanFitNewItem(base)) {
+                    // ⓖ PROBE. A refusal used to leave no trace at all, so a
+                    // report of "gold would not pick up" could not be told
+                    // apart from "the torch next to it would not". Gold is
+                    // supposed to be exempt (MaxAcceptUnits returns early on
+                    // IsGold), and this line is what proves whether it was.
+                    logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
+                                 "gold={} coin={} -- board full (PickUpObject)",
+                        base->GetName(), base->GetFormID(),
+                        static_cast<int>(base->GetFormType()),
+                        base->IsGold(),
+                        FUI::GoldCoins::IsCoinForm(base->GetFormID()));
                     FUI::Sfx::FailNote(FUI::Lang::T(FUI::Lang::Str::InventoryFull));
                     return;   // blocked: the reference stays in the world
                 }
@@ -206,6 +220,13 @@ namespace
                 // level as CapacityActivateHook (the sack conversion above
                 // must run first: gold ignores grid space)
                 if (!FUI::Grid::CanFitNewItem(a_this)) {
+                    // ⓖ probe: the same question at the MISC door, which is the
+                    // one gold actually walks through (Gold001 is a MISC record)
+                    logger::info("[PICKUP] refused '{}' ({:08X}) gold={} coin={} "
+                                 "-- board full (MISC activate)",
+                        a_this->GetName(), a_this->GetFormID(),
+                        a_this->IsGold(),
+                        FUI::GoldCoins::IsCoinForm(a_this->GetFormID()));
                     NotifyInventoryFull();
                     return false;   // blocked: the reference stays in the world
                 }
@@ -304,9 +325,35 @@ namespace
                         // are IGNORED on this side -- the equip direction
                         // never needed a rebuild (B3, measured), and e.g. a
                         // torch's "still worn" decline must not start one.
-                        (void)FUI::Grid::OnFormDelta(fid);
-                        auto* ui = RE::UI::GetSingleton();
-                        if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return;
+                        // ★Still ignored -- but SAID, because it used not to
+                        // be. The shared decline line claimed "full rebuild"
+                        // for every caller, and this one does not rebuild, so
+                        // a stale tile after an equip looked in the log like a
+                        // tile a rebuild had already been past. Which of the
+                        // two it is decides where to look next.
+                        if (!FUI::Grid::OnFormDelta(fid)) {
+                            // ★★ASK WHETHER A CLICK ALREADY DID IT.
+                            //
+                            // The decline used to be dropped outright, on the
+                            // reasoning above -- true for an equip started by
+                            // a grid click, which takes the tile off the board
+                            // at the moment of the click. An equip from the
+                            // QUICK WHEEL has no such click, and neither does
+                            // a hotkey or a script: nothing removes the tile,
+                            // and throwing the decline away left it standing
+                            // until some unrelated rebuild wandered past.
+                            // Measured -- a wheel equip, no removal, decline
+                            // swallowed, and only luck cleaning up after.
+                            if (FUI::Grid::ClaimOptimisticRemove(fid)) {
+                                SKSE::log::info("[B3] equip-side decline ignored "
+                                    "({:08X}) -- the click already took the tile", fid);
+                            } else {
+                                SKSE::log::info("[B3] equip-side decline escalated "
+                                    "({:08X}) -- nothing removed the tile", fid);
+                                FUI::Grid::RequestRebuild();
+                            }
+                        }
+                        if (!FUI::UIRoot::IsBoardLive()) return;   // nothing on screen
                         auto* player = RE::PlayerCharacter::GetSingleton();
                         if (!player || !player->Is3DLoaded()) return;
                         if (auto* proc =
@@ -347,6 +394,16 @@ namespace
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
                 a_this->produceItem && !FUI::Grid::CanFitNewItem(a_this->produceItem)) {
+                // ⓖ probe: WHAT the plant would have produced. This gate is
+                // where the vanilla coin purse was dying and it said nothing at
+                // all -- the refusal reached the player as a toast and the log
+                // as silence.
+                logger::info("[PICKUP] refused harvest '{}' -> produce '{}' "
+                             "({:08X}) type={} -- board full",
+                    a_this->GetName(),
+                    a_this->produceItem->GetName(),
+                    a_this->produceItem->GetFormID(),
+                    static_cast<int>(a_this->produceItem->GetFormType()));
                 NotifyInventoryFull();
                 return false;   // blocked: the plant stays harvestable
             }
@@ -378,6 +435,11 @@ namespace
         {
             if (a_activatorRef && a_activatorRef->IsPlayerRef() &&
                 !FUI::Grid::CanFitNewItem(a_this)) {
+                // ⓖ probe: the last of the four gates to get a voice
+                logger::info("[PICKUP] refused '{}' ({:08X}) type={} "
+                             "-- board full (activate)",
+                    a_this->GetName(), a_this->GetFormID(),
+                    static_cast<int>(a_this->GetFormType()));
                 NotifyInventoryFull();
                 return false;   // blocked: the reference stays in the world
             }
@@ -500,6 +562,12 @@ namespace
                 {
                     const RE::FormID deltaForm = a_event->baseObj;
                     SKSE::GetTaskInterface()->AddTask([deltaForm]() {
+                        // ★A quiver correction used to run here first, taking
+                        // the over-cap surplus back off the player's back
+                        // before the board was told. The board draws the quiver
+                        // as a capful now rather than making it into one, so
+                        // there is nothing to correct and this is just the
+                        // delta again (Equip.h, where the note lives).
                         if (!FUI::Grid::OnFormDelta(deltaForm)) {
                             FUI::Grid::RequestRebuild();
                         }
@@ -530,9 +598,10 @@ namespace
                     const bool left = a_event->oldContainer == 0x14;
                     const bool back = a_event->newContainer == 0x14;
                     if (left || back) {
-                        SKSE::GetTaskInterface()->AddTask([left]() {
-                            if (left) FUI::GoldCoins::OnPouchLeftPlayer();
-                            else      FUI::GoldCoins::OnPouchReturned();
+                        const RE::FormID pf = a_event->baseObj;   // ★which pouch
+                        SKSE::GetTaskInterface()->AddTask([left, pf]() {
+                            if (left) FUI::GoldCoins::OnPouchLeftPlayer(pf);
+                            else      FUI::GoldCoins::OnPouchReturned(pf);
                         });
                     }
                 }
@@ -580,6 +649,52 @@ namespace
         spdlog::set_pattern("[%H:%M:%S] [%l] %v");
     }
 
+    // ★Moved to UIRoot when the wheel needed the same question asked (its
+    // cancel key). Two copies of a control-map scan is two chances for the two
+    // to disagree about what a binding is; the reasoning lives with the one
+    // that survived.
+    using FUI::UIRoot::MappedScanCode;
+
+    // ★★★AND THE EVENT WAS THE WRONG ONE ALL ALONG. "Inventory" is the TWEEN
+    // MENU's entry -- the gamepad path -- and it carries NO keyboard binding,
+    // which is precisely the 0xFF the old note recorded and then worked around.
+    // The key a PC player actually presses is "Quick Inventory".
+    //
+    // The giveaway was sitting in the workaround: 0x17 is Quick Inventory's own
+    // default, and 0x19 is Quick Magic's. The fallbacks were right for the
+    // default binding and wrong for every other one, so nothing looked broken
+    // until somebody rebound the key -- and then the key that opened the grid
+    // could not close it. (Reported.)
+    //
+    // Both events are asked, quick first, because a pad player's binding really
+    // does live on the other one. The hardcoded default stays as a last resort:
+    // a wrong guess here is better than no way out of the menu at all.
+    [[nodiscard]] std::uint32_t InventoryScanCode()
+    {
+        auto* ue = RE::UserEvents::GetSingleton();
+        if (!ue) return 0x17;
+        std::uint32_t k = MappedScanCode(ue->quickInventory);
+        if (!k) k = MappedScanCode(ue->inventory);
+        if (!k) k = 0x17;   // I -- Quick Inventory's own default
+        static std::uint32_t s_said = 0;
+        if (s_said != k) {
+            s_said = k;
+            logger::info("[INV] close key resolves to scan 0x{:02X} "
+                         "(quick='{}' tween='{}')", k,
+                         ue->quickInventory.c_str(), ue->inventory.c_str());
+        }
+        return k;
+    }
+
+    [[nodiscard]] std::uint32_t MagicScanCode()
+    {
+        auto* ue = RE::UserEvents::GetSingleton();
+        if (!ue) return 0x19;
+        std::uint32_t k = MappedScanCode(ue->quickMagic);
+        if (!k) k = MappedScanCode("Magic");
+        return k ? k : 0x19;   // P -- Quick Magic's own default
+    }
+
     // ---- Input sink ----
     class InputSink : public RE::BSTEventSink<RE::InputEvent*>
     {
@@ -618,11 +733,46 @@ namespace
                 // Those hooks blank, call the original, and put the value back.
                 if (FUI::Wheeler::IsOpen()) continue;
 
+                // ★(1.5.x) a shelf-read book page is up: the player's ACTIVATE
+                // key takes the book home, the world page's own grammar. Only
+                // the atomic flag is written here (input thread); the take
+                // itself runs on the render thread at the page-close edge.
+                if (FUI::LootBarter::ShelfBookTakeArmed()) {
+                    if (auto* bt = e->AsButtonEvent(); bt && bt->IsDown()) {
+                        std::uint32_t want = 0;
+                        if (auto* cm = RE::ControlMap::GetSingleton()) {
+                            if (auto* ue = RE::UserEvents::GetSingleton()) {
+                                want = cm->GetMappedKey(ue->activate,
+                                                        e->GetDevice());
+                            }
+                        }
+                        // fallback: the keyboard default (E = 18)
+                        const bool hit =
+                            want != 0xFF && want != 0
+                                ? bt->GetIDCode() == want
+                                : (e->GetDevice() ==
+                                       RE::INPUT_DEVICE::kKeyboard &&
+                                   bt->GetIDCode() == 18);
+                        if (hit) {
+                            FUI::LootBarter::FlagShelfBookTake();
+                            if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
+                                mq->AddMessage(RE::BookMenu::MENU_NAME,
+                                               RE::UI_MESSAGE_TYPE::kHide,
+                                               nullptr);
+                            }
+                            continue;
+                        }
+                    }
+                }
+
+                // (InventoryScanCode is defined above the sink -- see there for
+                // why one context is not enough.)
                 // A real mouse event hands the pointer back from the pad.
                 // This is the ONLY reliable signal — see UIRoot::NoteMouseInput.
                 if (e->GetDevice() == RE::INPUT_DEVICE::kMouse) {
-                    if (auto* ui = RE::UI::GetSingleton();
-                        ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
+                    // IsBoardLive: while a window sits over us the pointer
+                    // is theirs, and taking it back would fight them for it
+                    if (FUI::UIRoot::IsBoardLive()) {
                         FUI::UIRoot::NoteMouseInput();
                     }
                     continue;
@@ -632,13 +782,16 @@ namespace
                 // Only while our menu owns the screen, so nothing here can
                 // touch normal gameplay input.
                 if (e->GetDevice() == RE::INPUT_DEVICE::kGamepad) {
-                    auto* ui = RE::UI::GetSingleton();
-                    if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) continue;
+                    if (!FUI::UIRoot::IsBoardLive()) continue;   // suppressed: their input
                     if (FUI::UIRoot::IsBookOpen()) continue;   // the book has input
                     if (auto* ts = e->AsThumbstickEvent()) {
                         FUI::UIRoot::NotePadStick(ts->IsRight(), ts->xValue, ts->yValue);
                         // let the engine's cursor move itself (see the header)
-                        FUI::UIRoot::FeedEngineCursor(ts);
+                        // ★LEFT stick only: the right stick is the SCROLL
+                        // wheel, and feeding it here had the engine walking
+                        // the pointer with it -- scroll and cursor moving on
+                        // one stick (user report).
+                        if (!ts->IsRight()) FUI::UIRoot::FeedEngineCursor(ts);
                     } else if (auto* gb = e->AsButtonEvent()) {
                         // held state, not the down EDGE: the UI needs press and
                         // release both (click-drag, the shift modifier)
@@ -684,15 +837,19 @@ namespace
                 // The game's Inventory key closes our menu. This sink sits
                 // UPSTREAM of input-context filtering, so it still sees the
                 // raw key while kMenuMode swallows the user event.
-                if (auto* ui = RE::UI::GetSingleton();
-                    ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
-                    auto* cm = RE::ControlMap::GetSingleton();
-                    // NOTE: GetMappedKey returns 0xFF here (confirmed in
-                    // the log) - fall back to the default I scancode.
-                    auto scan = cm ? cm->GetMappedKey(
-                        RE::UserEvents::GetSingleton()->inventory,
-                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
-                    if (scan == 0xFF || scan == 0xFFFFFFFF) scan = 0x17;   // default I
+                // hidden behind someone's window: the key is not ours to read
+                if (FUI::UIRoot::IsBoardLive()) {
+                    // ★★ASK EVERY CONTEXT, not just the default one.
+                    //
+                    // The old call took GetMappedKey's default context and got
+                    // 0xFF back, so it fell through to the hardcoded I -- and
+                    // a player who rebinds Inventory then cannot close the
+                    // grid with the key that opened it. GetMappedKey searches
+                    // controlMap[context] and nothing else, so "not in THIS
+                    // context" reads exactly like "not bound anywhere".
+                    // Reported alongside the wheel-key collision; the two
+                    // together are why rebinding Inventory looked broken.
+                    const auto scan = InventoryScanCode();
                     if (btn->GetIDCode() == scan) {
                         // input thread: defer state changes to the UI task
                         SKSE::GetTaskInterface()->AddUITask([]() {
@@ -712,10 +869,7 @@ namespace
                     // kItemMenu context never translates this key into a user
                     // event, so it is read raw here exactly like the
                     // Inventory key above (same 0xFF fallback story).
-                    static const RE::BSFixedString s_magicEvent("Magic");
-                    auto mscan = cm ? cm->GetMappedKey(s_magicEvent,
-                        RE::INPUT_DEVICE::kKeyboard) : 0xFF;
-                    if (mscan == 0xFF || mscan == 0xFFFFFFFF) mscan = 0x19;   // default P
+                    const auto mscan = MagicScanCode();
                     if (btn->GetIDCode() == mscan) {
                         SKSE::GetTaskInterface()->AddUITask([]() {
                             if (FUI::UIRoot::IsTextInputActive()) {
@@ -767,6 +921,54 @@ namespace
             file ? a_form->GetLocalFormID() : a_form->GetFormID());
         return key + buf;
     }
+
+    // ★★★ONE RECORD, TWO GROUND MODELS, AND ONLY EVER ONE ANGLE.
+    //
+    // An armour record carries a world model per sex, and 268 of 4386 in this
+    // load order carry two DIFFERENT ones. The tuning key is the FORM, so both
+    // sexes were handed the same rx/ry/rz -- and where the two nifs are laid
+    // out differently, an angle chosen while looking at one of them is simply
+    // wrong on the other. The shipped file was tuned on a female character, so
+    // it is male players who would see those items come out askew.
+    //
+    // The icon PIXELS were already dealt with: these records are left out of
+    // the shipped pak, so every install photographs its own character's model.
+    // That fixed the picture and left the angle behind, which is this.
+    //
+    // ★Both models must exist. Thousands of records fill only one side, and
+    // the game shows that one to everybody -- one model cannot disagree with
+    // itself, so those are not split and must not pay for this.
+    [[nodiscard]] bool SexSplitArmour(RE::TESBoundObject* a_obj)
+    {
+        auto* armo = a_obj ? a_obj->As<RE::TESObjectARMO>() : nullptr;
+        if (!armo) return false;
+        // ★Cached: this is a property of the RECORD and cannot change, while
+        // the ask sits under DefFor, which runs per tile.
+        static std::unordered_map<RE::FormID, bool> s_split;
+        const auto id = a_obj->GetFormID();
+        if (const auto it = s_split.find(id); it != s_split.end()) return it->second;
+        const char* m = armo->worldModels[RE::TESBipedModelForm::Sexes::kMale].GetModel();
+        const char* f = armo->worldModels[RE::TESBipedModelForm::Sexes::kFemale].GetModel();
+        const bool split = m && *m && f && *f && _stricmp(m, f) != 0;
+        s_split.emplace(id, split);
+        return split;
+    }
+
+    // "|F" / "|M" for a split record, nullptr for everything else. ★Read live
+    // rather than cached: showracemenu can change the answer mid-session, and
+    // two pointer hops are cheaper than being wrong until a reload.
+    [[nodiscard]] const char* SexSuffix(RE::TESBoundObject* a_obj)
+    {
+        if (!SexSplitArmour(a_obj)) return nullptr;
+        auto* pc = RE::PlayerCharacter::GetSingleton();
+        auto* base = pc ? pc->GetActorBase() : nullptr;
+        if (!base) return nullptr;
+        return base->GetSex() == RE::SEX::kFemale ? "|F" : "|M";
+    }
+
+    // ★Set at load if the file carries even one sex-suffixed line. On a fresh
+    // install nothing does, and DefFor's whole branch costs one bool test.
+    bool g_haveSexDefs = false;
 
     RE::TESBoundObject* FormFromKey(const std::string& a_key)
     {
@@ -914,6 +1116,11 @@ namespace
         std::sort(keys.begin(), keys.end(),
             [](const std::string* a, const std::string* b) { return *a < *b; });
         for (const auto* k : keys) {
+            // ★Sex-suffixed lines do not donate. ModelPathOf reads the MALE
+            // model, so a female-only angle entering this map would be handed
+            // to every sibling sharing that male nif -- the same leak this
+            // whole mechanism exists to close, coming back by the side door.
+            if (k->find('|', k->find('|') + 1) != std::string::npos) continue;
             auto* obj = FormFromKey(*k);
             if (!obj) continue;
             auto mp = ModelPathOf(obj);
@@ -1097,8 +1304,28 @@ namespace
 
     // Upsert (or remove, when a_def==nullptr) one item's line in the override ini —
     // the in-game editor writes through this, so hand-edits elsewhere are preserved.
-    void UpsertDefLine(const std::string& a_key, const ItemDef* a_def, const std::string& a_name)
+    // One edit to the overrides file. `def == nullptr` erases the key.
+    struct DefEdit
     {
+        std::string    key;
+        const ItemDef* def = nullptr;
+        std::string    name;
+    };
+
+    // ★★EVERY EDIT IN ONE PASS OF THE FILE (REVIEW_1.6.0 C-3).
+    //
+    // This read the whole file, changed one line and wrote the whole file back
+    // -- fine for one key, and a reset needs TWO (the sex-suffixed line and the
+    // plain one, in that order), so clearing a single item read and rewrote the
+    // overrides twice. The file carries an entry per edited item, so it is not
+    // small by the time anyone is resetting things.
+    //
+    // ★The edits still apply in the order given, which is what the reset needs:
+    // the sex line first, then the plain one, so the plain key is not left
+    // behind looking like the reset did nothing.
+    void UpsertDefLines(const std::vector<DefEdit>& a_edits)
+    {
+        if (a_edits.empty()) return;
         std::vector<std::string> lines;
         {
             std::ifstream in(kDefsPath);
@@ -1108,47 +1335,72 @@ namespace
         if (lines.empty()) {
             lines.push_back("; GridInventory item overrides (edited in-game via the EDIT mode)");
             lines.push_back("; key = w:, h:, rx:, ry:, rz:, scale:   or   shape:11|10|10 (rows of 1/0)");
+            lines.push_back(";");
+            lines.push_back("; An armour whose male and female ground models are DIFFERENT nifs can take a");
+            lines.push_back("; second line ending in |F or |M, which applies only to that sex; the plain key");
+            lines.push_back("; stays the default for both.");
         }
-        bool done = false;
-        for (auto it = lines.begin(); it != lines.end(); ++it) {
-            const auto eq = it->find('=');
-            if (eq == std::string::npos) continue;
-            std::string k = it->substr(0, eq);
-            k.erase(0, k.find_first_not_of(" \t"));
-            k.erase(k.find_last_not_of(" \t") + 1);
-            if (k != a_key) continue;
-            if (a_def) {
-                *it = FormatItemDef(a_key, *a_def);
-            } else {
-                // ★Take the "; Name" comment written directly above with it.
-                // Erasing the entry alone leaves the comment behind, where it
-                // then reads as the label of the NEXT, unrelated item — 211 of
-                // those had piled up in the shipped file. Index >= 2 keeps the
-                // two header comments safe.
-                auto first = it;
-                if (it != lines.begin()) {
-                    const auto prev = std::prev(it);
-                    if (std::distance(lines.begin(), prev) >= 2 &&
-                        !prev->empty() && prev->front() == ';') {
-                        first = prev;
+        for (const auto& ed : a_edits) {
+            bool done = false;
+            for (auto it = lines.begin(); it != lines.end(); ++it) {
+                const auto eq = it->find('=');
+                if (eq == std::string::npos) continue;
+                std::string k = it->substr(0, eq);
+                k.erase(0, k.find_first_not_of(" \t"));
+                k.erase(k.find_last_not_of(" \t") + 1);
+                if (k != ed.key) continue;
+                if (ed.def) {
+                    *it = FormatItemDef(ed.key, *ed.def);
+                } else {
+                    // ★Take the "; Name" comment written directly above with it.
+                    // Erasing the entry alone leaves the comment behind, where it
+                    // then reads as the label of the NEXT, unrelated item — 211 of
+                    // those had piled up in the shipped file. Index >= 2 keeps the
+                    // two header comments safe.
+                    auto first = it;
+                    if (it != lines.begin()) {
+                        const auto prev = std::prev(it);
+                        if (std::distance(lines.begin(), prev) >= 2 &&
+                            !prev->empty() && prev->front() == ';') {
+                            first = prev;
+                        }
                     }
+                    lines.erase(first, std::next(it));
                 }
-                lines.erase(first, std::next(it));
+                done = true;
+                break;
             }
-            done = true;
-            break;
-        }
-        if (!done && a_def) {
-            if (!a_name.empty()) lines.push_back("; " + a_name);
-            lines.push_back(FormatItemDef(a_key, *a_def));
+            if (!done && ed.def) {
+                if (!ed.name.empty()) lines.push_back("; " + ed.name);
+                lines.push_back(FormatItemDef(ed.key, *ed.def));
+            }
         }
         if (std::ofstream out(kDefsPath, std::ios::trunc); out) {
             for (const auto& l : lines) out << l << "\n";
         }
     }
 
+    void UpsertDefLine(const std::string& a_key, const ItemDef* a_def, const std::string& a_name)
+    {
+        UpsertDefLines({ { a_key, a_def, a_name } });
+    }
+
     ItemDef DefFor(RE::TESBoundObject* a_obj)
     {
+        // ★★A SEX-SPECIFIC LINE WINS, AND THE PLAIN ONE IS STILL THE DEFAULT.
+        // Purely additive: until somebody tunes a split record while playing
+        // one sex, nothing here matches and every item resolves exactly as it
+        // did. That is the point -- the file already shipped with a value for
+        // all 268 of these, and starting them over at the factory angle would
+        // trade a sometimes-wrong picture for a reliably-wrong one.
+        if (g_haveSexDefs) {
+            if (const char* sfx = SexSuffix(a_obj)) {
+                if (auto it = g_itemDefs.find(FormKey(a_obj) + sfx);
+                    it != g_itemDefs.end()) {
+                    return it->second;
+                }
+            }
+        }
         if (auto it = g_itemDefs.find(FormKey(a_obj)); it != g_itemDefs.end()) {
             return it->second;
         }
@@ -1231,6 +1483,12 @@ namespace
                 std::string key = line.substr(0, eq);
                 key.erase(0, key.find_first_not_of(" \t"));
                 key.erase(key.find_last_not_of(" \t") + 1);
+                // ★A second '|' is the sex marker ("Skyrim.esm|0x0136D5|F").
+                // Noting it here is what lets DefFor skip the whole lookup on
+                // every install that has never written one.
+                if (key.find('|', key.find('|') + 1) != std::string::npos) {
+                    g_haveSexDefs = true;
+                }
                 // shared metatable parser (ui/ItemDef.h) over factory defaults
                 g_itemDefs[key] = ParseItemDef(line.substr(eq + 1), ItemDef{});
             }
@@ -1322,21 +1580,30 @@ namespace
         {
             constexpr std::string_view kOurs = "grid inventory.esp|";
             std::vector<FUI::GoldCoins::BagWare> wares;
+            std::vector<RE::TESBoundObject*>     pouchWares;   // ★multi-pouch
             int foreign = 0;
             for (const auto& [key, d] : g_itemDefs) {
-                if (!d.bag) continue;
+                if (!d.bag && d.pouchCap <= 0) continue;
                 std::string lower = key.substr(0, (std::min)(key.size(), kOurs.size()));
                 for (auto& c : lower) {
                     c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
                 }
                 if (lower != kOurs) { ++foreign; continue; }
-                if (auto* obj = FormFromKey(key)) wares.push_back({ obj, d.accept });
+                auto* obj = FormFromKey(key);
+                if (!obj) continue;
+                if (d.bag) {
+                    wares.push_back({ obj, d.accept });
+                } else if (obj != FUI::GoldCoins::PouchForm()) {
+                    // a def-declared pouch (the builtin 0x804 places itself)
+                    pouchWares.push_back(obj);
+                }
             }
             if (foreign > 0) {
-                logger::info("[VENDOR] {} user-designated bag(s) from other plugins"
-                             " are NOT stocked (by design)", foreign);
+                logger::info("[VENDOR] {} user-designated bag(s)/pouch(es) from "
+                             "other plugins are NOT stocked (by design)", foreign);
             }
             FUI::GoldCoins::SetBagWares(std::move(wares));
+            FUI::GoldCoins::SetPouchWares(std::move(pouchWares));
         }
     }
 
@@ -1493,21 +1760,66 @@ namespace
     // ---- Phase 3: menu open/close handling, one function per menu concern ----
     // Each returns true when the event is fully handled (stop processing).
 
-    // Engine MessageBoxes (e.g. "apply poison to weapon?") render UNDER the
-    // movie-less menu and can't be clicked through it — step aside while the
-    // box is up, come back when it closes.
-    bool HandleMessageBoxAside(const RE::MenuOpenCloseEvent& a_event)
+    // ★★★A SCALEFORM WINDOW OVER A MOVIE-LESS MENU CANNOT BE REACHED.
+    //
+    // Engine MessageBoxes ("apply poison to weapon?") and the first-time
+    // tutorial popups both render UNDER us and cannot be clicked through, so
+    // we have to get out of the way. Two families, one rule.
+    //
+    // ★This used to CLOSE the menu and reopen it, and that was the wrong tool:
+    // closing runs the session teardown, so a box raised while the player was
+    // standing at a chest ended the loot session and reopened them into a
+    // plain inventory. The barter tutorial made it plainly wrong -- it fires
+    // on the first trade, and stepping aside would drop the player out of the
+    // shop they had just opened.
+    //
+    // Suppression keeps everything: the board, the carry, the partner, the
+    // trash. See the message contract in UIRoot.h.
+    // ★★A MENU HOP IS A REPLACEMENT, NOT A GUEST.
+    //
+    // Pressing J opens the Journal OVER us and nothing takes us down: the
+    // engine sends no kHide for this (measured -- no [SUPPRESS] line follows
+    // a J press), so the grid sat behind a full-screen menu, paused, with the
+    // player unable to reach either. These screens REPLACE the inventory in
+    // vanilla, so the honest answer is to close.
+    //
+    // ★Only the ones nobody else already handles: the magic hop closes us
+    // itself (see the hotkey sink), the wheel owns FavoritesMenu, and TweenMenu
+    // is part of our own open path. Adding those here would fight code that
+    // already works.
+    bool HandleMenuHopClose(const RE::MenuOpenCloseEvent& a_event)
     {
-        if (a_event.menuName != RE::MessageBoxMenu::MENU_NAME) return false;
+        if (!a_event.opening) return false;
+        if (a_event.menuName != RE::JournalMenu::MENU_NAME &&
+            a_event.menuName != RE::MapMenu::MENU_NAME &&
+            a_event.menuName != RE::StatsMenu::MENU_NAME) {
+            return false;
+        }
         auto* ui = RE::UI::GetSingleton();
+        if (!ui || !ui->IsMenuOpen("GridInventoryMenu"sv)) return false;
+        logger::info("[INV] {} opened -> closing the grid (menu hop)",
+                     a_event.menuName.c_str());
+        FUI::UIRoot::Close();
+        return false;   // let everything else see the event too
+    }
+
+    bool HandleOverlayAside(const RE::MenuOpenCloseEvent& a_event)
+    {
+        // "Tutorial Menu" is the whole kHelp* family -- barter, lockpicking,
+        // levelling, favourites and a dozen more -- so naming the MENU rather
+        // than the individual tutorials covers every one of them at once.
+        const bool isBox = a_event.menuName == RE::MessageBoxMenu::MENU_NAME;
+        const bool isTut = a_event.menuName == RE::TutorialMenu::MENU_NAME;
+        if (!isBox && !isTut) return false;
+        auto* ui = RE::UI::GetSingleton();
+        const char* who = isBox ? "MessageBox" : "Tutorial";
         if (a_event.opening && ui && ui->IsMenuOpen("GridInventoryMenu"sv)) {
-            g_reopenAfterMsg = true;
-            FUI::UIRoot::Close();
-            logger::info("[INV] MessageBox opened -> stepping aside");
-        } else if (!a_event.opening && g_reopenAfterMsg) {
-            g_reopenAfterMsg = false;
-            FUI::UIRoot::Open();
-            logger::info("[INV] MessageBox closed -> back to the grid");
+            FUI::UIRoot::Suppress(true, who);
+        } else if (!a_event.opening) {
+            // ★Unconditional on close: the safety net would get us back
+            // anyway, but a window we KNOW has gone should not cost the
+            // player the grace period.
+            if (FUI::UIRoot::IsSuppressed()) FUI::UIRoot::Suppress(false, who);
         }
         return true;
     }
@@ -1789,6 +2101,17 @@ namespace
                 return false;
             }
             const auto cmode = menu->GetContainerMode();
+            // ★TEST ONLY ("!npcvanilla"): give the FOLLOWER's trade container
+            // back to the engine and keep every other screen. Asked here, after
+            // the mode is known, because that is the only place the follower
+            // can be told apart from a chest. See UIRoot.h for the report this
+            // exists to narrow.
+            if (cmode == RE::ContainerMenu::ContainerMode::kNPCMode &&
+                FUI::UIRoot::NpcVanilla()) {
+                logger::warn("[LOOT] !npcvanilla -- follower trade left to the "
+                             "engine, not intercepted");
+                return false;
+            }
             FUI::LootBarter::Mode gmode;
             switch (cmode) {
             case RE::ContainerMenu::ContainerMode::kLoot:
@@ -1905,7 +2228,8 @@ namespace
                 }
                 // one handler per menu concern; true = event fully handled
                 HandleLockpickAutoReopen(*a_event);   // observation only
-                HandleMessageBoxAside(*a_event) ||
+                HandleMenuHopClose(*a_event) ||
+                HandleOverlayAside(*a_event) ||
                     HandleTextInputHotkeyBlock(*a_event) ||
                     HandleFavoritesMenuIntercept(*a_event) ||
                     HandleInventoryMenuIntercept(*a_event) ||
@@ -1930,6 +2254,22 @@ namespace
             [](RE::TESBoundObject* a_obj) -> FUI::IconDef { return DefFor(a_obj); });
         FUI::Grid::SetDefResolver(
             [](RE::TESBoundObject* a_obj) -> FUI::Grid::GridDef { return DefFor(a_obj); });
+        // ★Multi-pouch: a pouch's capacity comes from its item def
+        // ("pouchcap:N"), so a future pouch form is an ESP record plus one
+        // ini line -- no code. The builtin 0x804 stays seeded at 10,000.
+        // ★RAW MAP, NOT DefFor. DefFor's own fallback asks IsPouch (the
+        // builtin 2x2 sizing), and IsPouch asks this resolver -- routing the
+        // resolver back through DefFor closed that circle and the first
+        // IsCoinForm on any un-ini'd item recursed to a stack overflow
+        // (crash-2026-08-26-11-40-10). pouchcap only ever comes from an
+        // explicit ini entry, so the raw map is the complete answer.
+        FUI::GoldCoins::SetPouchDefResolver([](RE::FormID a_id) -> int {
+            auto* f = RE::TESForm::LookupByID(a_id);
+            auto* obj = f ? f->As<RE::TESBoundObject>() : nullptr;
+            if (!obj) return 0;
+            const auto it = g_itemDefs.find(FormKey(obj));
+            return it != g_itemDefs.end() ? it->second.pouchCap : 0;
+        });
         FUI::Grid::SetGameCallbacks(
             [](RE::TESBoundObject* a_obj, bool a_up) {   // vanilla per-item sounds (I2)
                 if (auto* player = RE::PlayerCharacter::GetSingleton()) {
@@ -1969,25 +2309,48 @@ namespace
             FUI::Editor::Hooks hooks;
             hooks.getEffective = [](RE::TESBoundObject* o) { return DefFor(o); };
             hooks.getDefault = [](RE::TESBoundObject* o) { return DefaultDef(o); };
-            hooks.hasOverride = [](RE::TESBoundObject* o) {
-                return g_itemDefs.contains(FormKey(o));
+            // ★★EDITING A SPLIT RECORD WRITES FOR THE BODY IN FRONT OF YOU.
+            // The angle was chosen against the model this character wears, so
+            // that is the only body it can be claimed for. Everything else --
+            // the 3357 records with one model, and every non-armour -- keeps
+            // the plain key it has always had.
+            const auto editKey = [](RE::TESBoundObject* o) {
+                std::string k = FormKey(o);
+                if (const char* sfx = SexSuffix(o)) k += sfx;
+                return k;
             };
-            hooks.setOverride = [](RE::TESBoundObject* o, const FUI::Editor::FullDef& f,
-                                   bool a_persist) {
-                const std::string key = FormKey(o);
+            hooks.hasOverride = [editKey](RE::TESBoundObject* o) {
+                return g_itemDefs.contains(editKey(o)) || g_itemDefs.contains(FormKey(o));
+            };
+            hooks.setOverride = [editKey](RE::TESBoundObject* o,
+                                          const FUI::Editor::FullDef& f, bool a_persist) {
+                const std::string key = editKey(o);
                 ItemDef d = f;
                 DeriveShapeBounds(d);   // the editor may have repainted the mask
                 g_itemDefs[key] = d;   // live: the resolvers see it immediately
+                if (key.size() != FormKey(o).size()) g_haveSexDefs = true;
                 g_modelDefsDirty = true;
                 if (a_persist) {
                     UpsertDefLine(key, &d, o->GetName() ? o->GetName() : "");
                 }
             };
-            hooks.resetOverride = [](RE::TESBoundObject* o) {
-                const std::string key = FormKey(o);
-                g_itemDefs.erase(key);
+            hooks.resetOverride = [editKey](RE::TESBoundObject* o) {
+                // ★Both, and in that order. Reset means "stop overriding this
+                // item", and leaving the plain line behind after clearing the
+                // sex-specific one would look like the reset did nothing.
+                const std::string key = editKey(o);
+                const std::string base = FormKey(o);
+                std::vector<DefEdit> edits;
+                if (key != base) {
+                    g_itemDefs.erase(key);
+                    edits.push_back({ key, nullptr, {} });
+                }
+                g_itemDefs.erase(base);
                 g_modelDefsDirty = true;
-                UpsertDefLine(key, nullptr, "");
+                edits.push_back({ base, nullptr, {} });
+                // ★One pass of the file for both keys (C-3): this used to read
+                // and rewrite the whole overrides file once per key.
+                UpsertDefLines(edits);
             };
             hooks.saveAsCategory = [](RE::TESBoundObject* o, const FUI::Editor::FullDef& f) {
                 ItemDef d = f;
@@ -2129,10 +2492,37 @@ namespace
 
         FUI::UIRoot::SetVisibilityCallbacks(
             []() {   // menu shown
-                LoadCategoryDefs();   // hot-reload category defaults (H7)
-                LoadItemDefs();       // hot-reload user overrides (same as legacy path)
-                LoadUniqueDefs();     // ...and the unique declarations beside them
-                LoadFlatIconDefs();   // hot-reload IconStudio's drawn-icon edits
+                // ★Hot-reload BY TIMESTAMP. These four parses ran on every
+                // open -- ~5,000 override lines re-read to produce the same
+                // tables -- because hot reload was implemented as "always
+                // reload". The reload's PURPOSE is picking up edits, and an
+                // edit is visible in the file's write time, so unchanged
+                // files now skip the parse (measured ~20-30ms per open).
+                // The editor's own saves bump the timestamp like any external
+                // edit, so nothing about the reload story changes.
+                namespace fs = std::filesystem;
+                static const char* kWatched[] = { kCatsPath, kDefsPath,
+                                                  kUniquePath, kFlatPath };
+                static fs::file_time_type s_seen[4]{};
+                static bool s_first = true;
+                bool changed = s_first;
+                s_first = false;
+                for (int i = 0; i < 4; ++i) {
+                    std::error_code ec;
+                    const auto t = fs::last_write_time(kWatched[i], ec);
+                    // a missing file reads as epoch -- still a comparable
+                    // value, so deleting or restoring an ini counts as a change
+                    if (t != s_seen[i]) {
+                        s_seen[i] = t;
+                        changed = true;
+                    }
+                }
+                if (changed) {
+                    LoadCategoryDefs();   // hot-reload category defaults (H7)
+                    LoadItemDefs();       // hot-reload user overrides (same as legacy path)
+                    LoadUniqueDefs();     // ...and the unique declarations beside them
+                    LoadFlatIconDefs();   // hot-reload IconStudio's drawn-icon edits
+                }
                 // typed bags phase 0: classify what the player is carrying and
                 // write the tally out. ONCE per session — this is an
                 // observation, not a feature, and it must not cost anything on
@@ -2180,7 +2570,12 @@ namespace
             g_movementOff = false;
         }
         g_planBPendingOpen = false;
-        g_reopenAfterMsg = false;
+        // ★suppression does not survive a load either: the window that
+        //  asked for it belongs to the session being left -- kOverride,
+        //  because a client hold refuses everything softer and its owner
+        //  is not there to release it.
+        FUI::UIRoot::Suppress(false, "session reset",
+                              FUI::UIRoot::SuppressBy::kOverride);
         // ★★★A DEBT OWED TO A SAVE THAT IS GONE. g_echoMenu names a vanilla
         // menu whose close we still have to announce; left set across a load,
         // MenuCloseEchoTick fires it on the FIRST unpaused frame of the new
@@ -2244,6 +2639,8 @@ namespace
             // no cosave load callback fires on new game — start with an empty
             // grid layout instead of migrating the legacy ini (old saves only)
             FUI::Grid::MarkLayoutFresh();
+            // ⓛ probe: the museum index, once the forms are real
+            SKSE::GetTaskInterface()->AddTask([]() { FUI::Lotd::Rebuild(); });
             break;
         case SKSE::MessagingInterface::kPreLoadGame:
             ResetSession();
@@ -2252,6 +2649,9 @@ namespace
             FUI::DeltaWatch::Reset("load");
             FUI::Census::Reset("load");
             FUI::Ledger::Reset("load");
+            // ★The museum handles name THIS game's references. Dropped before
+            // the swap, rebuilt after it (kPostLoadGame).
+            FUI::Lotd::Clear();
             break;
         case SKSE::MessagingInterface::kPostLoadGame:
             ResetSession();
@@ -2265,22 +2665,45 @@ namespace
             // Costume::NoteGameLoaded: the engine rebuilds the actor for a
             // while after this message, and every rebuild undoes it.
             FUI::Costume::NoteGameLoaded();
-            // ★The equip survived the save; the LOAN did not -- the engine
-            // re-read the carrier from the plugin. Re-lend before the player
-            // can notice a second ring that stopped working.
-            FUI::DualRing::OnLoad();
+            // ★1.6.0 migration: an old save can still be WEARING the retired
+            // second-ring carrier. Deferred like the rest -- it unequips, and
+            // this message arrives while the engine is still settling. See
+            // Costume::SweepRetiredCarrier for why leaving it is not an option.
+            SKSE::GetTaskInterface()->AddTask([]() {
+                FUI::Costume::SweepRetiredCarrier();
+            });
+            // ⓛ probe: the museum index. Deferred like the rest -- the display
+            // references have to exist before their state means anything.
+            SKSE::GetTaskInterface()->AddTask([]() { FUI::Lotd::Rebuild(); });
+            // ★Icon warm-up: hand the icon cache the forms the player is
+            // carrying so their pak sprites go resident BEFORE the first
+            // open. The cache itself paces the work (grace period + a couple
+            // of reads per tick) -- see IconCache::QueueWarm.
+            SKSE::GetTaskInterface()->AddTask([]() {
+                auto* p = RE::PlayerCharacter::GetSingleton();
+                if (!p) return;
+                std::vector<RE::FormID> forms;
+                for (auto& [obj, pair] : p->GetInventory()) {
+                    if (obj && pair.first > 0) forms.push_back(obj->GetFormID());
+                }
+                FUI::IconCache::GetSingleton()->QueueWarm(std::move(forms));
+            });
             break;
         }
     }
 
     // ---- SKSE cosave: one record loop, dispatched by type ----
+    // ★A retired type, kept only so the loop can recognise and DROP it. The
+    // second-ring carrier owned 'DRNG' until 1.6.0; nothing writes it now, and
+    // every save made before the update still carries one.
+    constexpr std::uint32_t kRetiredDualRingRecord = 'DRNG';
+
     void SaveCallback(SKSE::SerializationInterface* a_intfc)
     {
         FUI::Loadout::SaveGame(a_intfc);
         FUI::Grid::SaveGame(a_intfc);
         FUI::GoldCoins::SaveGame(a_intfc);
         FUI::Costume::SaveGame(a_intfc);
-        FUI::DualRing::SaveGame(a_intfc);
         FUI::LootBarter::SaveGame(a_intfc);   // F7: container spot memory (GCLY)
         FUI::Wheeler::SaveGame(a_intfc);      // quick-wheel slot order (GWHL)
     }
@@ -2297,8 +2720,19 @@ namespace
                 FUI::GoldCoins::LoadRecord(a_intfc, version);
             } else if (type == FUI::Costume::kRecordType) {
                 FUI::Costume::LoadRecord(a_intfc, version);
-            } else if (type == FUI::DualRing::kRecordType) {
-                FUI::DualRing::LoadRecord(a_intfc, version);
+            } else if (type == kRetiredDualRingRecord) {
+                // ★1.6.0: the second ring is still here, but its CARRIER is
+                // gone and this record described the carrier. It is READ AND
+                // DROPPED rather than left to the unknown-type branch below --
+                // which would warn on every load of every save made before the
+                // update, for a record that is not corruption and holds
+                // nothing anyone still wants. The carrier it names is taken
+                // off by Costume::SweepRetiredCarrier, which asks the
+                // inventory instead of trusting this; and the second ring
+                // itself needs no record at all now, because a load restores
+                // the slot bits and Tick re-derives the rest from the body.
+                logger::info("[COSAVE] retired 'DRNG' record dropped "
+                             "(second-ring carrier, replaced in 1.6.0)");
             } else if (type == FUI::Wheeler::kRecordType) {
                 FUI::Wheeler::LoadRecord(a_intfc, version);
             } else if (type == FUI::LootBarter::kContRecordType) {
@@ -2318,7 +2752,7 @@ namespace
     {
         FUI::Loadout::RevertGame(a_intfc);
         FUI::Costume::RevertGame(a_intfc);
-        FUI::DualRing::RevertGame(a_intfc);
+        FUI::DualRing::RevertGame();
         FUI::Wheeler::RevertGame(a_intfc);
         FUI::Grid::RevertGame(a_intfc);
         FUI::GoldCoins::RevertGame(a_intfc);
@@ -2329,7 +2763,7 @@ namespace
 }
 
 SKSEPluginInfo(
-    .Version              = { 1, 4, 3, 0 },
+    .Version              = { 1, 6, 1, 0 },
     .Name                 = "GridInventory",
     .Author               = "Smooth (modified: Lorkhan RP fork)",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
@@ -2337,6 +2771,13 @@ SKSEPluginInfo(
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
     InitializeLog();
+    // ★★★WHICH BINARY IS THIS. The version line alone cannot answer it: every
+    // test build a reporter is sent carries the same 1.5.0, so a log from one
+    // is indistinguishable from a log from another -- and "I installed it" and
+    // "it did not help" then look identical. Four builds went out on one bug
+    // before that gap was noticed. The compile stamp is unique per build and
+    // costs a line.
+    SKSE::log::info("build " __DATE__ " " __TIME__);
     SKSE::Init(a_skse);
     // GPL-3.0 section 5(a) : dire que ce binaire est une version MODIFIEE,
     // et de quoi. Section 6(d) : offrir la source la ou le binaire arrive.

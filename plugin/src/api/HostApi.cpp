@@ -1,7 +1,8 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Smooth <skypia0147-dev@users.noreply.github.com>
 // Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
 
+#include "ui/Sfx.h"
 #include "ui/Sfx.h"
 #include "PCH.h"
 
@@ -26,8 +27,23 @@ namespace FUI::HostApi
 
         bool Svc_IsMenuOpen()
         {
-            auto* ui = RE::UI::GetSingleton();
-            return ui && ui->IsMenuOpen("GridInventoryMenu"sv);
+            // ★★★NOT IsBoardLive, and the header two files over says so in as
+            // many words: "the grid stays OPEN throughout ... and
+            // IsMenuOpen("GridInventoryMenu") keeps answering true".
+            //
+            // Answering liveness here broke that promise, and the field found
+            // it immediately. A client suppressed us, read this back, saw
+            // false, concluded the menu it was living over had closed, and
+            // shut its own window 17ms later -- five times out of five. The
+            // grid had not closed at all; we told it that it had. A client
+            // cannot be asked to distinguish "you are suppressed, by you"
+            // from "the player closed the inventory" through one boolean that
+            // says false in both cases.
+            //
+            // So this answers the engine's question -- is the session on the
+            // stack -- which is the one the ABI documents and the one that
+            // survives suppression.
+            return UIRoot::IsSessionOpen();
         }
 
         // Grant-time tile snapshot. Counts only the TRUE cells of a polyomino
@@ -140,6 +156,29 @@ namespace FUI::HostApi
             if (!a_msg) return;
             if (a_msg->type == GridInvAPI::kMsgRegisterProvider) {
                 OnRegisterProvider(a_msg);
+                return;
+            }
+            if (a_msg->type == GridInvAPI::kMsgSuppressUI) {
+                // ★Same size check every ABI struct gets: a sender built
+                // against a different header is refused rather than read.
+                const auto* p = static_cast<const GridInvAPI::SuppressUI*>(a_msg->data);
+                if (!p || a_msg->dataLen < sizeof(GridInvAPI::SuppressUI) ||
+                    p->structSize != sizeof(GridInvAPI::SuppressUI)) {
+                    logger::warn("[API] suppress: malformed payload -- ignored");
+                    return;
+                }
+                // ★kClient: this sender named itself, so it OWNS the hold --
+                // the safety net stops second-guessing it against the menu
+                // stack (which cannot see a window that is not a menu), and
+                // nothing expires it. Its own release, our close and a load
+                // are the only ways back. The obligation that buys is spelled
+                // out where clients read it, in GridInventoryAPI.h.
+                // ★RequestClientSuppress, never Suppress: this listener runs on
+                // whatever thread the sender dispatched from, and Suppress
+                // reads RE::UI's menu map, which is walked without a lock.
+                UIRoot::RequestClientSuppress(p->suppress != 0,
+                                              a_msg->sender ? a_msg->sender : "api");
+                return;
             }
         }
     }

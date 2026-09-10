@@ -7,8 +7,8 @@
 #include "ui/Editor.h"
 #include "ui/Equip.h"
 #include "game/Costume.h"
-#include "game/DeltaWatch.h"
 #include "game/DualRing.h"
+#include "game/DeltaWatch.h"
 #include "game/GoldCoins.h"
 #include "ui/Loadout.h"
 #include "ui/GridMenu.h"
@@ -284,9 +284,13 @@ namespace FUI::UIRoot
                 // (The mouse is deliberately NOT blocked — the console does not
                 // use it, and freezing a window the player can still see is
                 // worse than letting them point at it.)
+                // ★IsBoardLive, not IsMenuOpen: while suppressed the window
+                // over us owns the keyboard, and this road bypasses Scaleform
+                // entirely -- leaving it open would feed every keystroke into
+                // our ImGui behind somebody else's editor.
                 if (auto* ui = RE::UI::GetSingleton();
-                    ui && ui->IsMenuOpen("GridInventoryMenu"sv) &&
-                    !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
+                    IsBoardLive() &&
+                    ui && !ui->IsMenuOpen(RE::Console::MENU_NAME) &&
                     ImGui::GetCurrentContext()) {
                     if (m == WM_CHAR) {
                         g_wmCharSeen.fetch_add(1, std::memory_order_relaxed);
@@ -353,31 +357,117 @@ namespace FUI::UIRoot
             static unsigned s_lastChars = 0;
             static int      s_contradictions = 0;
 
+            // A press waiting one frame to see whether the window road answers
+            // it -- see the doubt block below. Modifiers travel WITH the press,
+            // because by the time it is judged the player may have let shift go.
+            struct Pending { int vk; bool shift; bool caps; };
+            static Pending  s_pend[8] = {};
+            static int      s_pendN = 0;
+            static unsigned s_pendBase = 0;
+
             // Only ever while a text field is waiting. Outside one there is
             // nothing to type into, and ToUnicodeEx is stateful (dead keys) --
             // calling it for every key at all times would leave half-composed
             // accents lying around for the next field that opens.
-            if (!a_io.WantTextInput) {
+            //
+            // ★And only while the board actually owns the keyboard. This is the
+            // SECOND road for characters, so the guard the thunk carries has to
+            // sit on it too -- "blocking one road and calling it done is the
+            // whole bug" is written thirty lines up, about this very pair. With
+            // the console up, or somebody else's overlay holding us suppressed,
+            // WantTextInput can still read true from the frame before, and an
+            // unguarded road would put the player's console command into our
+            // search box.
+            auto* ui = RE::UI::GetSingleton();
+            if (!a_io.WantTextInput || !IsBoardLive() ||
+                !ui || ui->IsMenuOpen(RE::Console::MENU_NAME)) {
                 for (auto& d : s_down) d = false;
+                s_pendN = 0;   // nothing left to type into; drop the doubt too
                 return;
             }
 
             const bool shift = (GetAsyncKeyState(VK_SHIFT) & 0x8000) != 0;
             const bool ctrl  = (GetAsyncKeyState(VK_CONTROL) & 0x8000) != 0;
             const bool alt   = (GetAsyncKeyState(VK_MENU) & 0x8000) != 0;
+            const bool caps  = (GetKeyState(VK_CAPITAL) & 1) != 0;
 
+            // The count as of the PREVIOUS sweep. A press detected now happened
+            // somewhere between that sweep and this one, so this is the mark a
+            // later WM_CHAR has to beat to prove it belongs to that press.
+            const unsigned prevChars = s_lastChars;
             const unsigned chars = g_wmCharSeen.load(std::memory_order_relaxed);
             const bool     wmAlive = chars != s_lastChars;
             s_lastChars = chars;
 
-            BYTE ks[256] = {};
-            if (g_kbFallback) {
+            // ★★A WM_CHAR JUST ARRIVED, AND THAT HAS TO BE ACTED ON.
+            // The build that only ever counted upward is why a reporter saw
+            // every letter typed twice. Two things follow from one arrival:
+            //
+            //   1. The tally goes back to zero. The latch below reasons "one
+            //      frame could be a race; three cannot" -- true of three IN A
+            //      ROW, and this counter never reset, so it was three IN A
+            //      LIFETIME. Races an hour apart added up on a machine whose
+            //      WM_CHAR was never broken for a moment.
+            //   2. The fallback lets go. It is the second road; it exists only
+            //      while the first is dead, and the first just spoke. Both alive
+            //      means both deliver, and ImGui cannot tell that the two
+            //      characters were one keystroke.
+            //
+            // Order matters: this runs BEFORE the sweep, so on the frame the
+            // window road comes back it is already the only road.
+            if (wmAlive) {
+                s_contradictions = 0;
+                if (g_kbFallback) {
+                    g_kbFallback = false;
+                    SKSE::log::info(
+                        "[UI] input: WM_CHAR is arriving again (chars {}). Polled "
+                        "characters off -- the window road has the keyboard.",
+                        chars);
+                }
+            }
+
+            auto synth = [&a_io](int a_vk, bool a_shift, bool a_caps) {
                 // ToUnicodeEx reads the WHOLE table, so the modifiers have to be
-                // in it or every letter comes out lower case.
-                if (shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
-                if (ctrl)  { ks[VK_CONTROL] = 0x80; }
-                if (alt)   { ks[VK_MENU] = 0x80; }
-                if (GetKeyState(VK_CAPITAL) & 1) ks[VK_CAPITAL] = 0x01;
+                // in it or every letter comes out lower case. Ctrl and Alt are
+                // never here: a shortcut is filtered out before it can queue.
+                BYTE ks[256] = {};
+                if (a_shift) { ks[VK_SHIFT] = 0x80; ks[VK_LSHIFT] = 0x80; }
+                if (a_caps)  { ks[VK_CAPITAL] = 0x01; }
+                const UINT sc = MapVirtualKeyW(static_cast<UINT>(a_vk), MAPVK_VK_TO_VSC);
+                WCHAR     buf[8] = {};
+                const int n = ToUnicodeEx(static_cast<UINT>(a_vk), sc, ks, buf,
+                                          static_cast<int>(std::size(buf)), 0,
+                                          GetKeyboardLayout(0));
+                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
+                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                }
+            };
+
+            // ★★★ONE FRAME OF DOUBT, AND THE DOUBLING BECOMES IMPOSSIBLE.
+            //
+            // The latch above is evidence, and evidence can be stale: it was
+            // gathered at some earlier moment and the road may have been fine
+            // ever since. Acting on it the instant a key goes down is what let a
+            // wrongly-latched session put the FIRST letter in twice -- the spare
+            // road spoke in the same frame as the press, and the real WM_CHAR
+            // for it only arrived on the next.
+            //
+            // So a press is not answered where it is seen. It waits one sweep,
+            // and is spoken for only if no WM_CHAR turned up in the meantime.
+            // On a healthy machine one always does, so nothing is ever
+            // synthesised and the un-latch above happens off the same evidence:
+            // not one doubled character, not even the first.
+            //
+            // On a machine whose road really is dead, nothing turns up, every
+            // press is spoken for, and the whole cost is one frame -- sixteen
+            // milliseconds of a keystroke nobody was going to receive at all.
+            if (s_pendN > 0) {
+                if (chars == s_pendBase) {
+                    for (int i = 0; i < s_pendN; ++i) {
+                        synth(s_pend[i].vk, s_pend[i].shift, s_pend[i].caps);
+                    }
+                }
+                s_pendN = 0;
             }
 
             for (int vk = 0; vk < 256; ++vk) {
@@ -387,13 +477,26 @@ namespace FUI::UIRoot
                 s_down[vk] = now;
                 if (!now) continue;
 
+                // ★A SHORTCUT IS NOT A CHARACTER, and it must not be judged as
+                // one. This sat below, inside the fallback branch only, so the
+                // latch above it saw every shortcut as evidence: Ctrl+A and
+                // Ctrl+V in the search box arrive as control codes, and ANY Alt
+                // combination arrives as WM_SYSCHAR -- which the thunk does not
+                // count at all, making each one a guaranteed "contradiction".
+                // Selecting-all and pasting a search term could latch the
+                // doubling road by itself. It belongs above BOTH branches.
+                if (ctrl || alt) continue;
+
                 if (!g_kbFallback) {
                     // ★THE LATCH, and it is a CONTRADICTION rather than a
                     // timeout: a printable key went down while a text field was
                     // focused, and no WM_CHAR arrived for it. One such frame
-                    // could be a race; three cannot. On a healthy setup this can
-                    // never fire, so the road stays inert -- one sweep a frame
-                    // while typing, and no events at all.
+                    // could be a race -- GetAsyncKeyState is true the instant the
+                    // key is physically down, while the count above only rises
+                    // when the game's message pump dispatches, so a key pressed
+                    // after this frame's pump reads as a contradiction and is
+                    // answered next frame. Three CONSECUTIVE cannot be that; the
+                    // reset above is what makes the word consecutive true.
                     if (!wmAlive && ++s_contradictions >= 3) {
                         g_kbFallback = true;
                         SKSE::log::warn(
@@ -408,14 +511,16 @@ namespace FUI::UIRoot
                     continue;
                 }
 
-                if (ctrl || alt) continue;   // a shortcut, not a character
-                const UINT sc = MapVirtualKeyW(static_cast<UINT>(vk), MAPVK_VK_TO_VSC);
-                WCHAR     buf[8] = {};
-                const int n = ToUnicodeEx(static_cast<UINT>(vk), sc, ks, buf,
-                                          static_cast<int>(std::size(buf)), 0,
-                                          GetKeyboardLayout(0));
-                for (int i = 0; i < n && i < static_cast<int>(std::size(buf)); ++i) {
-                    if (buf[i] >= 0x20) a_io.AddInputCharacterUTF16(buf[i]);
+                // Queued, not spoken. Judged on the next sweep against the mark
+                // taken before the press. The overflow arm can only be reached
+                // by eight printable keys going down inside one frame, and a
+                // keystroke that cannot be queued is spoken immediately rather
+                // than lost.
+                if (s_pendN < static_cast<int>(std::size(s_pend))) {
+                    s_pendBase = prevChars;
+                    s_pend[s_pendN++] = { vk, shift, caps };
+                } else {
+                    synth(vk, shift, caps);
                 }
             }
         }
@@ -438,9 +543,11 @@ namespace FUI::UIRoot
         // What remains below is observation only: counts of what actually
         // arrives. Liveness is a thing you measure, never a pointer you compare.
 
-        // fonts are BAKED at the current UI scale (bitmap-scaling hangul via
-        // FontGlobalScale mushes the strokes). While the slider drags we
-        // preview via FontGlobalScale ratio; on release the atlas rebakes.
+        // The atlas is built for the DISPLAY scale and for the glyph ranges
+        // the active language pack wants -- those two, and nothing else, are
+        // what this flag asks to be rebuilt. The player's text size is not in
+        // here: it rides on style.FontScaleMain and needs no rebuild at all
+        // (see BuildFonts).
         std::atomic<bool> g_fontsDirty = false;
         float             g_bakedScale = 1.0f;
 
@@ -517,6 +624,20 @@ namespace FUI::UIRoot
         // narrows that ratio and is the size the panel wanted anyway.
         constexpr float kBodyFont = 17.0f;
 
+        // ★★THE TEXT-SIZE SETTING IS NOT IN HERE, and that is measured, not
+        // preference. ImGui 1.92 sizes text as
+        //     style.FontSizeBase * style.FontScaleMain
+        // and FontSizeBase is seeded ONCE, from the first font's LegacySize:
+        //
+        //     if (g.Style.FontSizeBase <= 0.0f)                 // imgui.cpp
+        //         g.Style.FontSizeBase = font->LegacySize;
+        //
+        // -- so rebuilding the atlas at a bigger size does NOT resize a single
+        // string. It never did. Baking the player's setting in here would also
+        // mean that on the one startup where the ini loaded BEFORE the first
+        // bake, the seed carried the setting AND FontScaleMain multiplied it
+        // again. The bake carries the DISPLAY scale, which is what seeds a
+        // base; the player's multiplier rides on FontScaleMain, live.
         void BuildFonts()
         {
             auto& io = ImGui::GetIO();
@@ -639,6 +760,11 @@ namespace FUI::UIRoot
             // inherit and these two are pinned to physical buttons.
             kActRotL      = 1u << 10,
             kActRotR      = 1u << 11,
+            // ★LT's empty-cursor meaning. Both triggers used to carry the
+            // split/compare modifier; RT keeps it (one modifier is enough),
+            // and LT becomes the recharge key the board and the doll already
+            // listen for as T -- the one hover verb a pad had no way to say.
+            kActRecharge  = 1u << 12,
         };
 
         std::atomic<std::uint32_t> g_padRaw{ 0 };       // physical buttons held
@@ -650,6 +776,13 @@ namespace FUI::UIRoot
         std::atomic<float>         g_padScrollY{ 0.0f };  // right stick
         std::atomic<bool>          g_padActive{ false };  // a pad drives the UI
         ImVec2                     g_padCursor{ 0.0f, 0.0f };
+        // ★d-pad nudges accumulate here and are applied AFTER the frame's
+        // position source has spoken -- in ENGINE mode the engine's read
+        // overwrote g_padCursor every frame, so a nudge written directly
+        // into it never survived to a pos event (the d-pad "stopped
+        // working" for exactly the players whose engine drives the cursor).
+        float                      g_padNudgeX = 0.0f;
+        float                      g_padNudgeY = 0.0f;
 
         constexpr float kPadCursorSpeed = 1400.0f;   // px/s at full deflection
         constexpr float kPadScrollRate  = 26.0f;
@@ -669,7 +802,30 @@ namespace FUI::UIRoot
         float         g_engineLastX = 0.0f;
         float         g_engineLastY = 0.0f;
         int           g_engineStillFrames = 0;
-        bool              g_bookWasOpen = false;   // Book Menu edge (see Render)
+        bool              g_hiddenWas = false;   // off-screen edge: book OR suppressed
+        // ★suppression (UIRoot.h): open, but neither drawing nor listening.
+        // atomic because the menu message arrives on the game thread while
+        // Render reads it on the render thread.
+        std::atomic<bool> g_suppressed{ false };
+        int               g_suppressTicks = 0;   // safety-net age, in Ticks
+        // ★GI83: age of "the preview is running but the menu is gone" (see the
+        // second net in Tick). Separate from the suppression age above: that
+        // one waits for somebody else's window to go, this one waits only for
+        // the menu map to settle.
+        int               g_orphanTicks   = 0;
+        // ★A named client holds this one (UIRoot.h SuppressBy). ATOMIC because
+        // a client dispatches its message on whatever thread it likes, and
+        // SKSE hands the dispatch straight to us on that thread -- a plain
+        // bool written there and read by the net is a data race.
+        std::atomic<bool> g_suppressByClient{ false };
+        // ...and the request itself is parked rather than acted on, for the
+        // same reason. Guarded because the sender's name is a string: two
+        // clients arriving at once must not tear it. Not a per-frame path --
+        // this is touched once per suppress message (rule 4-3 #3 is safe).
+        std::mutex        g_clientReqLock;
+        bool              g_clientReqPending = false;
+        bool              g_clientReqOn      = false;
+        std::string       g_clientReqWho;
 
         // Called from the input sink (game thread, but not the render pass) —
         // only flags are touched here; the cursor is seeded during the frame.
@@ -693,24 +849,70 @@ namespace FUI::UIRoot
             const auto edge = [&](std::uint32_t a_bit) { return (changed & a_bit) != 0; };
             const auto down = [&](std::uint32_t a_bit) { return (now & a_bit) != 0; };
 
-            if (edge(kActPrimary))   io.AddMouseButtonEvent(0, down(kActPrimary));
+            // ★★★A POPUP SPEAKS KEYBOARD, SO THE PAD SPEAKS KEYBOARD TO IT.
+            //
+            // The quantity slider and the confirm dialogs listen for Enter /
+            // Space / Escape and the arrow keys -- none of which any pad
+            // button translated to. Every button below was a mouse button or
+            // a board shortcut, so "take 40 gold" on a controller meant
+            // steering the cursor onto each little button and clicking it
+            // (user report). While one of those windows is up, the face
+            // buttons become what vanilla's dialogs taught: A confirms, Y is
+            // Max, the d-pad walks the count. B already cancels through the
+            // user-event channel (ue->cancel closes the top window), so it
+            // needs nothing here.
+            //
+            // ★Resolved at PRESS and remembered per button -- the same rule
+            // the triggers follow. A popup that closes while A is held must
+            // release the Enter it pressed, not a mouse button it never did.
+            const bool modal = LootBarter::SliderActive() ||
+                               LootBarter::ConfirmActive() ||
+                               Grid::IsTrashConfirmOpen() ||
+                               Equip::IsPopupOpen();
+            static bool s_priAsEnter = false;
+            static bool s_dropAsMax  = false;
+            static bool s_nudgeLKey  = false;
+            static bool s_nudgeRKey  = false;
+
+            if (edge(kActPrimary)) {
+                if (down(kActPrimary)) s_priAsEnter = modal;
+                if (s_priAsEnter) io.AddKeyEvent(ImGuiKey_Enter, down(kActPrimary));
+                else              io.AddMouseButtonEvent(0, down(kActPrimary));
+            }
             if (edge(kActSecondary)) io.AddMouseButtonEvent(1, down(kActSecondary));
-            if (edge(kActDrop))      io.AddKeyEvent(ImGuiKey_R, down(kActDrop));
+            if (edge(kActDrop)) {
+                if (down(kActDrop)) s_dropAsMax = modal;
+                // M is the slider's Max key (see DrawSlider); R stays the
+                // board's drop/take-all everywhere else.
+                io.AddKeyEvent(s_dropAsMax ? ImGuiKey_M : ImGuiKey_R, down(kActDrop));
+            }
             if (edge(kActFavorite))  io.AddKeyEvent(ImGuiKey_F, down(kActFavorite));
             if (edge(kActInspect))   io.AddKeyEvent(ImGuiKey_C, down(kActInspect));
             if (edge(kActRotL))      io.AddKeyEvent(ImGuiKey_A, down(kActRotL));
             if (edge(kActRotR))      io.AddKeyEvent(ImGuiKey_D, down(kActRotR));
+            // LT, empty cursor: the same T the recharge hover handlers read
+            if (edge(kActRecharge))  io.AddKeyEvent(ImGuiKey_T, down(kActRecharge));
             if (edge(kActSplit)) {
                 io.AddKeyEvent(ImGuiMod_Shift, down(kActSplit));
                 io.AddKeyEvent(ImGuiKey_LeftShift, down(kActSplit));
             }
             // d-pad nudges exactly one cell — the only way to hit a specific
-            // tile reliably without a mouse
+            // tile reliably without a mouse. In a popup the count is what
+            // needs walking, not the cursor: left/right become the arrow keys
+            // the slider already listens for (held, so key-repeat runs).
             const float step = Grid::CellPx();
-            if (edge(kActNudgeL) && down(kActNudgeL)) g_padCursor.x -= step;
-            if (edge(kActNudgeR) && down(kActNudgeR)) g_padCursor.x += step;
-            if (edge(kActNudgeU) && down(kActNudgeU)) g_padCursor.y -= step;
-            if (edge(kActNudgeD) && down(kActNudgeD)) g_padCursor.y += step;
+            if (edge(kActNudgeL)) {
+                if (down(kActNudgeL)) s_nudgeLKey = modal;
+                if (s_nudgeLKey) io.AddKeyEvent(ImGuiKey_LeftArrow, down(kActNudgeL));
+                else if (down(kActNudgeL)) g_padNudgeX -= step;
+            }
+            if (edge(kActNudgeR)) {
+                if (down(kActNudgeR)) s_nudgeRKey = modal;
+                if (s_nudgeRKey) io.AddKeyEvent(ImGuiKey_RightArrow, down(kActNudgeR));
+                else if (down(kActNudgeR)) g_padNudgeX += step;
+            }
+            if (edge(kActNudgeU) && down(kActNudgeU)) g_padNudgeY -= step;
+            if (edge(kActNudgeD) && down(kActNudgeD)) g_padNudgeY += step;
 
             g_padPrev = now;
         }
@@ -783,8 +985,12 @@ namespace FUI::UIRoot
             // ★Rotation is deliberately not looked up in ControlMap above:
             // there is no game action called "turn the thing you are holding",
             // so there would be nothing to ask for.
+            // ★★LT's empty-cursor half is RECHARGE now (user ask), not a
+            // second split modifier. RT alone carries split/compare -- the
+            // two never disagreed anyway, so nothing is lost -- and the
+            // labels below follow: kActSplit resolves to RT, recharge to LT.
             case K::kLeftTrigger:
-                return Grid::IsHolding() ? kActRotL : kActSplit;
+                return Grid::IsHolding() ? kActRotL : kActRecharge;
             case K::kRightTrigger:
                 return Grid::IsHolding() ? kActRotR : kActSplit;
             case K::kLeft:          return kActNudgeL;
@@ -799,7 +1005,7 @@ namespace FUI::UIRoot
         // runs the binding lookup above (ControlMap + string compares) once per
         // button, so it is resolved on menu open and cached — KeyLabel() is
         // called every frame a tooltip is up.
-        const char* g_padLabel[8]{};   // indexed by Act
+        const char* g_padLabel[9]{};   // indexed by Act
         bool        g_padLabelReady = false;
 
         void ResolvePadLabels()
@@ -822,6 +1028,9 @@ namespace FUI::UIRoot
                 // ★②: rotate has buttons now -- the triggers, while something
                 // is on the cursor -- so the prompts can name them.
                 kActRotL, kActRotR,
+                // LT's empty-cursor half; the loop resolves it naturally
+                // (ResolvePadLabels runs with an empty cursor).
+                kActRecharge,
             };
             static_assert(std::size(kWanted) == std::size(g_padLabel));
 
@@ -1023,6 +1232,24 @@ namespace FUI::UIRoot
                         mc->cursorPosY = g_padCursor.y;
                     }
                 }
+                // ★the pending d-pad step lands on whatever drove the
+                // position this frame, and is pushed back into the engine's
+                // cursor so its next read keeps the step instead of undoing
+                // it. Our write must not read back as "the engine moved".
+                if (g_padNudgeX != 0.0f || g_padNudgeY != 0.0f) {
+                    g_padCursor.x = std::clamp(g_padCursor.x + g_padNudgeX,
+                                               0.0f, io.DisplaySize.x - 1.0f);
+                    g_padCursor.y = std::clamp(g_padCursor.y + g_padNudgeY,
+                                               0.0f, io.DisplaySize.y - 1.0f);
+                    g_padNudgeX = 0.0f;
+                    g_padNudgeY = 0.0f;
+                    if (mc) {
+                        mc->cursorPosX = g_padCursor.x;
+                        mc->cursorPosY = g_padCursor.y;
+                        g_engineLastX = mc->cursorPosX;
+                        g_engineLastY = mc->cursorPosY;
+                    }
+                }
                 io.AddMouseSourceEvent(ImGuiMouseSource_Mouse);
                 io.AddMousePosEvent(g_padCursor.x, g_padCursor.y);
                 TranslatePadButtons();
@@ -1138,10 +1365,11 @@ namespace FUI::UIRoot
         // column beside each field. These rows have no width to spare, so the
         // help goes to the bottom bar, which already carries hover help.
         bool SettingSlider(const char* a_id, float* a_v, float a_lo, float a_hi,
-                           float a_w, float a_def, const char* a_fmt = "%.2f")
+                           float a_w, float a_def, const char* a_fmt = "%.2f",
+                           float a_snap = 0.0f)
         {
             const bool ch =
-                Theme::ChromeSliderFloat(a_id, a_v, a_lo, a_hi, a_w, a_fmt, a_def);
+                Theme::ChromeSliderFloat(a_id, a_v, a_lo, a_hi, a_w, a_fmt, a_def, a_snap);
             if (ImGui::IsItemHovered()) {
                 char buf[96];
                 std::snprintf(buf, sizeof(buf), "%s  %.2f",
@@ -1185,6 +1413,70 @@ namespace FUI::UIRoot
             if (ImGui::IsItemDeactivatedAfterEdit()) {
                 WinManager::GetSingleton()->Save();
                 Grid::RequestRebuild();   // cell size changes what fits per row
+            }
+        }
+
+        // TEXT SIZE — the automatic display scale is not a setting, and until
+        // now nothing was: a 4K player who found 17px too small had nowhere to
+        // go. This multiplies that automatic value, so 1.00 is exactly what
+        // shipped and the panel keeps sizing itself by resolution underneath.
+        //
+        // ★★A CONTROL MUST NOT MOVE WHILE A HAND IS ON IT. That is the whole
+        // reason this row defers, and it took three wrong theories to see it.
+        //
+        // This panel is made of the very text this row sizes. Applying the
+        // value live re-laid the panel out underneath itself: the caption and
+        // the SCALE row above grew taller, the window grew with them, and the
+        // slider slid DOWN out from under the cursor -- which is still holding
+        // the grab where the mouse is. Grab and track were then in two places,
+        // moving against each other, every frame. That is what looked like a
+        // doubled, ghosted image.
+        //
+        // ★The cell-size slider never did this and the difference is not the
+        // slider, it is what each one resizes: cells live on the BOARD window,
+        // so the panel holding that slider stays still. This one resizes the
+        // panel it is in.
+        // ★It also explains why bigger steps were WORSE rather than better:
+        // fewer reflows, but each one moved the control further.
+        //
+        // So the number follows the hand and the size follows the release.
+        // The arrows and the right-click default apply at once -- they are one
+        // change with nothing held down, so nothing slides anywhere.
+        void RowFontScale(const SettingsCtx& a_c)
+        {
+            SettingLabel(a_c, Lang::Str::FontScaleLabel);
+            RightAlign(a_c.trackW);
+
+            // ★s_held is set ONLY by this widget and cleared the moment the
+            // value lands, so a preset load — which writes the same setting
+            // from elsewhere — is never overwritten by a stale pending number.
+            static float s_want = 1.0f;
+            static bool  s_held = false;
+
+            float fs = s_held ? s_want : Theme::FontScale();
+            // ★NO "and the value moved" test here, and that is the fix for one:
+            // SettingSlider is already true only when something moved it, and
+            // adding `fs != s_want` compared the new value against a static
+            // that starts at 1.0 rather than at the setting. So the FIRST move
+            // to exactly 1.00 in a session was thrown away -- which is the
+            // right-click default, the one gesture most likely to land there.
+            if (SettingSlider("##fontscale", &fs,
+                              Theme::kMinFontScale, Theme::kMaxFontScale, a_c.trackW,
+                              1.0f, "%.2f", Theme::kFontScaleStep)) {
+                s_want = fs;
+                s_held = true;
+            }
+            // ★"Nothing is held" is asked of ImGui rather than of the slider:
+            // IsItemDeactivatedAfterEdit only answers for the drag, while the
+            // right-click default never activates the slider at all and the
+            // step arrows are their own items. One condition, all four ways.
+            if (s_held && !ImGui::IsAnyItemActive()) {
+                s_held = false;
+                // ★The write rides along: true means the value really moved,
+                // so this cannot put the ini through a save per frame.
+                if (Theme::SetFontScale(s_want)) {
+                    WinManager::GetSingleton()->Save();
+                }
             }
         }
 
@@ -1948,7 +2240,11 @@ namespace FUI::UIRoot
         // Favorites binding now, so the place to change it is the game's
         // controls -- a second, private binding for the same key would be a
         // setting that can disagree with the one the player already trusts.
-        constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowLanguage,
+        // ★TEXT SIZE sits right under SCALE: both answer "this is too small",
+        // and putting them together is what lets a player try one and then the
+        // other without hunting.
+        constexpr SettingsRowFn kRowsGeneral[] = { RowCellScale, RowFontScale,
+                                                   RowLanguage,
                                                    RowWheelEnable,
                                                    RowPreset, RowPresetExport };
         // ★SKIN leads DISPLAY rather than sitting in GENERAL: every row under
@@ -2009,6 +2305,7 @@ namespace FUI::UIRoot
             };
             const float labelW = (std::max)(84.0f * S, 32.0f * S + (std::max)({
                 lw(Lang::Str::ScaleLabel),
+                lw(Lang::Str::FontScaleLabel),
                 lw(Lang::Str::SkinLabel),
                 lw(Lang::Str::LanguageLabel),
                 lw(Lang::Str::PresetLabel),
@@ -2070,12 +2367,17 @@ namespace FUI::UIRoot
             static float s_wantH = 0.0f;   // desired full window height
             const ImVec2 disp = ImGui::GetIO().DisplaySize;
             const float maxH = disp.y - 80.0f * S;
+            // ★see Editor.cpp: no bar is drawn, so this is the report's
+            //  verdict rather than a width allowance
             const bool clamped = s_wantH > 0.0f && s_wantH > maxH;
+            if (Grid::FitTrace() && clamped) {
+                SKSE::log::info("[EDITFIT] settings wants {:.0f} > screen {:.0f}"
+                                " -- body wheels (no bar)", s_wantH, maxH);
+            }
             const float winH = s_wantH > 0.0f ? (std::min)(s_wantH, maxH)
                                               : 440.0f * S + 2.0f * insY;
             const ImVec2 size(
-                12.0f + insX + labelW + ctrlW + 12.0f + insX +
-                    (clamped ? ImGui::GetStyle().ScrollbarSize : 0.0f),
+                12.0f + insX + labelW + ctrlW + 12.0f + insX,   // no bar to allow for
                 winH);
             ImVec2 defPos(200.0f, 200.0f);
             if (auto* mw = wm->Find("main")) {
@@ -2101,8 +2403,11 @@ namespace FUI::UIRoot
 
             const SettingsCtx ctx{ labelW, trackW, S };
             const float childTop = ImGui::GetCursorPosY();
+            // ★No bar here either -- see the note on the editor's body. The
+            // wheel still scrolls; only the bar is gone, and with it the width
+            // it used to take out of the rows.
             ImGui::BeginChild("##settings_body", ImVec2(0.0f, 0.0f), ImGuiChildFlags_None,
-                ImGuiWindowFlags_NoBackground);
+                ImGuiWindowFlags_NoBackground | ImGuiWindowFlags_NoScrollbar);
             ImGui::Dummy(ImVec2(0.0f, 4.0f * S));
             for (size_t s = 0; s < std::size(kSettingsSections); ++s) {
                 const auto& sec = kSettingsSections[s];
@@ -2115,8 +2420,17 @@ namespace FUI::UIRoot
             }
             const float bodyH = ImGui::GetCursorPosY() + 4.0f * S;   // bottom margin
             ImGui::EndChild();
+            // ★See the [EDITFIT] note in Editor.cpp: a non-bordered child
+            // gets NO window padding, so this window cannot overflow on its
+            // own either -- a scrollbar here is the maxH clamp, meaning the
+            // content is taller than the screen allows.
             s_wantH = childTop + bodyH + 8.0f + insY;   // + bottom window padding
-
+            if (Grid::FitTrace()) {
+                SKSE::log::info("[EDITFIT] settings content {:.0f} want {:.0f} "
+                                "maxH {:.0f} scale {:.2f} disp {:.0f} inset {:.0f}{}",
+                                childTop + bodyH, s_wantH, maxH, S, disp.y, insY,
+                                s_wantH > maxH ? "  ★CLAMPED" : "");
+            }
             ImGui::End();
             ImGui::PopStyleVar();   // WindowPadding (torn-frame inset)
         }
@@ -2303,7 +2617,13 @@ namespace FUI::UIRoot
 
             const bool over = Grid::IsOverloaded();
             const int used = Grid::SpaceUsed(), total = (std::max)(1, Grid::SpaceTotal());
-            std::snprintf(buf, sizeof(buf), "%d / %d", used, total);
+            // ★W3: carry-weight cells are part of the total -- say so, so a
+            // potion or a perk visibly moves this figure
+            if (const int cwb = Grid::CwBonusCells(); cwb > 0) {
+                std::snprintf(buf, sizeof(buf), "%d / %d (+%d)", used, total, cwb);
+            } else {
+                std::snprintf(buf, sizeof(buf), "%d / %d", used, total);
+            }
             const ImU32 spaceCol = over ? IM_COL32(204, 81, 72, 255) : hi;
             row(Lang::T(Lang::Str::StatSpace), buf, spaceCol);
 
@@ -2373,9 +2693,13 @@ namespace FUI::UIRoot
         // glyph and once to reserve the strip the drag zone must not cover.
         // Those two had drifted into a hardcoded 1.55 and a live
         // recomputation of the same thing.
+        // ★The ratio is no longer scale-free in BOTH terms, and that is the
+        // point: the title stays put while the body grows with the text-size
+        // setting, so the multiplier shrinks by exactly as much and the ✕
+        // lands at the same absolute size inside its unchanged bar.
         [[nodiscard]] float TitleCloseMul()
         {
-            return Theme::SnapPx(Theme::S().titleSize) /
+            return Theme::FontTitle() /
                    (std::max)(1.0f, ImGui::GetFontSize());
         }
 
@@ -2903,15 +3227,37 @@ namespace FUI::UIRoot
             // and cannot be reached from the settings window anyway
             } else if (ImGui::GetTime() < g_flatReloadNote) {
                 bits = { { "", T(S::IconReloadDone) } };
-            } else if (LootBarter::SliderActive() || Grid::IsPouchOpen()) {
+            } else if (LootBarter::SliderActive() || Grid::IsPouchOpen() ||
+                       LootBarter::ConfirmActive() || Grid::IsTrashConfirmOpen() ||
+                       Equip::IsPopupOpen()) {
                 // the pouch withdraw window answers the same keys as the
-                // quantity slider -- it just is not a LootBarter one
-                bits = { { "\xE2\x86\x90", "" }, { "\xE2\x86\x92", T(S::PromptStep) },
-                         { "Enter", T(S::Confirm), true },
-                         { "ESC", T(S::Cancel), true } };
-                if (LootBarter::SliderActive()) {
-                    bits.insert(bits.begin() + 2, { "MAX", T(S::PromptMax), true });
+                // quantity slider -- it just is not a LootBarter one.
+                // ★On a pad the row names the BUTTONS, now that the buttons
+                // work here (TranslatePadButtons remaps them while a popup is
+                // up): A confirms, Y is Max, the d-pad walks the count, and B
+                // cancels through the same user-event channel as ESC. A row
+                // that said "Enter" to a player holding a controller was a
+                // hint about somebody else's hands.
+                // ★The confirm dialogs (sell, trash, equip) join the branch:
+                // they answer the same keys minus the counting pair.
+                const bool pad = g_padActive.load();
+                const bool counting = LootBarter::SliderActive() || Grid::IsPouchOpen();
+                bits.clear();
+                if (counting) {
+                    if (pad) {
+                        bits.push_back({ "D-Pad", T(S::PromptStep) });
+                    } else {
+                        bits.push_back({ "\xE2\x86\x90", "" });
+                        bits.push_back({ "\xE2\x86\x92", T(S::PromptStep) });
+                    }
                 }
+                bits.push_back({ pad ? KeyLabel(Act::kPrimary) : "Enter",
+                                 T(S::Confirm), !bits.empty() });
+                if (LootBarter::SliderActive()) {
+                    bits.push_back({ pad ? KeyLabel(Act::kDrop) : "MAX",
+                                     T(S::PromptMax), true });
+                }
+                bits.push_back({ pad ? "B" : "ESC", T(S::Cancel), true });
             } else if (Grid::IsHolding()) {
                 bits = { { K(Act::kPrimary), T(S::PromptPlace) },
                          { K(Act::kSecondary), T(S::Cancel), true } };
@@ -2920,7 +3266,13 @@ namespace FUI::UIRoot
                     bits.insert(bits.begin() + 1, { K(Act::kRotateCW), T(S::ActRotate) });
                     bits[2].sep = true;   // divider after the rotate group
                 }
-            } else if (Grid::IsTrashOpen()) {
+            // ★(1.5.0 audit) HOVER OUTRANKS the trash's standing row. The verb
+            // resolver already answers "discard" over a board item and
+            // "restore" over a parked one while the bin is open -- but this
+            // branch sat ahead of the hover branch, so the bar kept promising
+            // "restore" over an item the click would BIN. The warning row
+            // stays for the idle bar.
+            } else if (Grid::IsTrashOpen() && !Grid::HoveredPrompt().active) {
                 warn = true;
                 bits = { { "", T(S::WarnTrashClose) },
                          { K(Act::kSecondary), T(S::ActRestore), true } };
@@ -2966,6 +3318,13 @@ namespace FUI::UIRoot
                 }
                 if (hp.hasVerb) {
                     bits.push_back({ K(Act::kSecondary), T(hp.verb) });
+                }
+                // ★(1.5.0) shelf USE MODE: a container's book reads (a tome
+                // learns) in place on Shift+right-click -- the one verb of
+                // that board no click could discover on its own
+                if (hp.canShelfUse) {
+                    bits.push_back({ K(Act::kSplit) + "+" + K(Act::kSecondary),
+                                     T(hp.useVerb) });
                 }
                 if (hp.canCompare) {
                     bits.push_back({ K(Act::kSplit), T(S::ActCompare), !bits.empty() });
@@ -3464,8 +3823,145 @@ namespace FUI::UIRoot
     void Close()
     {
         if (auto* mq = RE::UIMessageQueue::GetSingleton()) {
-            mq->AddMessage(GridInventoryMenu::MENU_NAME, RE::UI_MESSAGE_TYPE::kHide, nullptr);
+            // ★kForceHide, not kHide: kHide is the courtesy another mod sends
+            // to put a window over us, and it suppresses now instead of
+            // closing (see the contract in UIRoot.h). Our own close has to say
+            // so unambiguously, and kForceHide is the engine's own word for it.
+            mq->AddMessage(GridInventoryMenu::MENU_NAME,
+                           RE::UI_MESSAGE_TYPE::kForceHide, nullptr);
         }
+    }
+
+    void Suppress(bool a_on, const char* a_why, SuppressBy a_by)
+    {
+        // ★★OWNERSHIP, and both halves of it run BEFORE the early-out.
+        //
+        // Both halves run BEFORE the early-out, so that a message arriving
+        // while the state is already what it asks for still settles OWNERSHIP:
+        // a client whose suppress lands while the engine already had us hidden
+        // would otherwise never own the thing it asked for.
+        if (a_on) {
+            if (a_by == SuppressBy::kClient) {
+                // ★★★A HOLD OVER NOTHING IS A TRAP, and with no timer behind
+                // it, a permanent one. Taken while the inventory is CLOSED,
+                // the hold survives to the next open -- where kShow is refused
+                // (it is kEngine), the board never draws, and every key that
+                // could close it is gated behind IsBoardLive. The player would
+                // have an open, invisible, unreachable menu for the rest of
+                // the session, and nothing in the design would ever end it.
+                //
+                // There is nothing to step aside from when we are not on
+                // screen, so the request is refused rather than banked.
+                if (!IsSessionOpen()) {
+                    SKSE::log::warn("[SUPPRESS] refused ({}): the inventory is "
+                                    "not open -- send it while the menu is up",
+                                    a_why);
+                    return;
+                }
+                g_suppressByClient.store(true);
+            }
+        } else {
+            // ★★GIVING BACK IS THE HOLDER'S TO DO, and it cuts BOTH ways.
+            //
+            // kEngine while a client holds: refused. The engine hands us a
+            // kShow whenever the stack thinks we are topmost again, and
+            // honouring it would put the board back on screen over a client
+            // window that is still up, silently, with no event the client
+            // could answer.
+            //
+            // kClient while the ENGINE holds: also refused, and this one is
+            // less obvious. A client that closes its window while a vanilla
+            // confirmation box happens to be up would otherwise lift the box's
+            // suppression too -- and the net never re-suppresses, it only
+            // releases, so the board would sit over that box until the player
+            // dismissed it. That is exactly the bug 1.5.1 was released to fix,
+            // reachable again through a release nobody meant to be about it.
+            const bool held = g_suppressByClient.load();
+            if (a_by == SuppressBy::kEngine && held)  return;
+            if (a_by == SuppressBy::kClient && !held) return;
+            g_suppressByClient.store(false);
+        }
+        if (g_suppressed.exchange(a_on) == a_on) return;
+        if (a_on) {
+            g_suppressTicks = 0;
+            // ★Step 0 of the plan, done in the field instead of guessed at:
+            // whoever suppressed us has a menu open, and the safety net has to
+            // tell it from the ones that are always there. Naming them here
+            // means a report carries the list rather than a theory about it.
+            std::string open;
+            if (auto* ui = RE::UI::GetSingleton()) {
+                for (const auto& [name, entry] : ui->menuMap) {
+                    // ★menuMap is every REGISTERED menu, not the open ones --
+                    // the first version of this line printed all forty-five
+                    // of them and said nothing at all.
+                    if (!ui->IsMenuOpen(name)) continue;
+                    if (name == GridInventoryMenu::MENU_NAME) continue;
+                    open += ' ';
+                    open += name.c_str();
+                }
+            }
+            SKSE::log::info("[SUPPRESS] on ({}, {}) -- open menus:{}", a_why,
+                            g_suppressByClient.load() ? "client-held" : "engine",
+                            open.empty() ? " (none)" : open.c_str());
+        } else {
+            SKSE::log::info("[SUPPRESS] off ({})", a_why);
+        }
+    }
+
+    void RequestClientSuppress(bool a_on, const char* a_who)
+    {
+        // Nothing here may touch the engine: see the header. Park and return.
+        std::scoped_lock lock(g_clientReqLock);
+        g_clientReqPending = true;
+        g_clientReqOn      = a_on;
+        g_clientReqWho     = a_who ? a_who : "api";
+    }
+
+    // Game thread, from Tick. Applies whatever the last message asked for --
+    // a suppress and a release in the same frame collapse to the release,
+    // which is the right answer for a boolean.
+    void ApplyPendingClientSuppress()
+    {
+        bool        on{};
+        std::string who;
+        {
+            std::scoped_lock lock(g_clientReqLock);
+            if (!g_clientReqPending) return;
+            g_clientReqPending = false;
+            on                 = g_clientReqOn;
+            who                = std::move(g_clientReqWho);
+            g_clientReqWho.clear();
+        }
+        Suppress(on, who.c_str(), SuppressBy::kClient);
+    }
+
+    bool IsSuppressed() { return g_suppressed.load(std::memory_order_relaxed); }
+
+    bool IsSuppressedByClient() { return g_suppressByClient.load(); }
+
+    std::uint32_t MappedScanCode(std::string_view a_event)
+    {
+        if (auto* cm = RE::ControlMap::GetSingleton()) {
+            using Ctx = RE::ControlMap::InputContextID;
+            for (std::uint32_t c = 0; c < static_cast<std::uint32_t>(Ctx::kTotal); ++c) {
+                const auto k = cm->GetMappedKey(a_event, RE::INPUT_DEVICE::kKeyboard,
+                                                static_cast<Ctx>(c));
+                if (k != 0xFF && k != 0xFFFFFFFF && k != 0) return k;
+            }
+        }
+        return 0;
+    }
+
+    bool IsSessionOpen()
+    {
+        auto* ui = RE::UI::GetSingleton();
+        return ui && ui->IsMenuOpen(GridInventoryMenu::MENU_NAME);
+    }
+
+    bool IsBoardLive()
+    {
+        if (IsSuppressed()) return false;
+        return IsSessionOpen();
     }
 
     void OpenInspect(RE::TESBoundObject* a_obj, const std::string& a_key)
@@ -3750,6 +4246,13 @@ namespace FUI::UIRoot
         // this is the reading that matters -- kPostLoadGame fires before the 3D
         // is back, so the report there cannot see what the body actually built.
         g_menuOpenSfx = 10;   // clear of the open transition (3 was too early)
+        // ★Open-transition BURST: for the next few ticks the icon cache may
+        // restore a screenful of pak sprites at once instead of 8 per frame.
+        // The open is already a covered moment (menu fade), so the batch is
+        // invisible where the trickle read as pop-in -- and a CONTAINER
+        // session benefits most, since a chest's contents are exactly the
+        // sprites the player is least likely to have resident.
+        IconCache::GetSingleton()->Burst(4);
         // Re-ask the engine which button carries what: the player may have
         // rebound the controls since the last time the menu was up. Done HERE,
         // on the game thread, so the render thread only ever reads the result.
@@ -3766,7 +4269,8 @@ namespace FUI::UIRoot
                 Theme::S().translucent ? center
                                        : ParkOnScreen(wm->MainCenter(center)));
 
-            // ini scale arrived after the init-time bake -> rebake once
+            // ini display scale arrived after the init-time bake -> rebake
+            // once. NOT the text size: that one never goes through the atlas.
             if (std::fabs(Theme::Scale() - g_bakedScale) > 0.005f) {
                 g_fontsDirty.store(true);
             }
@@ -3793,12 +4297,53 @@ namespace FUI::UIRoot
             }
         }
 
+        // ★The wheel's magic side cannot photograph its own icons -- no 3D
+        // scene there -- and a spell is never in the bag, so nothing else
+        // would ever ask. Every open, because favourites change between them.
+        IconCache::GetSingleton()->QueueFavouriteSpells();
+
         SKSE::log::info("[UI] menu shown ({} icons cached)",
             IconCache::GetSingleton()->CachedCount());
+
+        // ★AUTHOR TOOLING, on the same watch-file idiom as the vanilla
+        // passthrough: drop the file, open the bag once, and the shipping pak
+        // is beside it. Nothing here runs for a player, and the file is removed
+        // afterwards so a forgotten one cannot rewrite the pak every session.
+        //
+        // ★★THE TWO SURVEYS MOVED IN HERE, and that is the whole change. They
+        // asked how many armours have a picture that depends on who wears them,
+        // and how many spells the engine already draws an object for. Both
+        // questions are ANSWERED -- 268 of 4386, and 813 of 947 -- and both
+        // answers were acted on: the sex-dependent ones are left out of the pak
+        // and the spells got their icons. What was left was a form-array walk
+        // and thirteen lines of internal arithmetic in the log of every player
+        // who ever opened a bag, reporting a decision that had already been
+        // taken. They belong with the tool that consumes them, behind its file.
+        static bool s_authorRan = false;
+        if (!s_authorRan) {
+            s_authorRan = true;
+            std::error_code ec;
+            constexpr const char* kFlag =
+                "Data/SKSE/Plugins/GridInventory_makeshippingpak.txt";
+            if (std::filesystem::exists(kFlag, ec)) {
+                IconCache::GetSingleton()->ReportSexSpecificArmour();
+                IconCache::GetSingleton()->ReportSpellDisplayObjects();
+                IconCache::GetSingleton()->ExportShippingPak(
+                    "Data/SKSE/Plugins/GridInventory_icons.shipping.pak");
+                std::filesystem::remove(kFlag, ec);
+            }
+        }
     }
 
     void OnClose()
     {
+        // ★★A HOLD MUST NOT OUTLIVE THE THING IT WAS HELD OVER. A client hold
+        // refuses the engine's kShow and never expires, so if it is not
+        // answered here NOTHING answers it: the next open would come up
+        // suppressed and invisible and stay that way for the rest of the
+        // session. The window it was covering is gone, so the hold ends here
+        // -- with kOverride, because the client is not the one saying so.
+        Suppress(false, "menu closed", SuppressBy::kOverride);
         CloseInspect();           // release the pinned inspect model + engine scale
         Editor::OnMenuClosed();   // flush pending edits, drop selection
         // F2: closing the whole menu confirms every parked deletion; flush
@@ -3903,8 +4448,8 @@ namespace FUI::UIRoot
         };
         const auto i = static_cast<std::size_t>(a_act);
         if (i >= std::size(kKeyboard)) return "";
-        // ★Past the pad table: recharge has no controller binding, so it always
-        // answers with its key rather than reading off the end of g_padLabel.
+        // (recharge used to stop at the keyboard here -- it rides LT now and
+        // reads off the pad table like everything else)
         if (i >= std::size(g_padLabel)) return kKeyboard[i];
         // Read-only on the render thread: the table is filled on the game
         // thread in OnShow, so nothing here touches ControlMap. An unresolved
@@ -4050,6 +4595,28 @@ namespace FUI::UIRoot
         if (a_dl) a_dl->AddCallback(&MipSamplerCB, nullptr);
     }
 
+    void SyncDisplaySize()
+    {
+        // B11(P2): queried per frame — a once-cached size went stale after a
+        // borderless/fullscreen switch and desynced from OnShow's park math.
+        //
+        // ★★★AND IT OVERRULES THE WIN32 BACKEND, which is the whole point.
+        // ImGui_ImplWin32_NewFrame fills DisplaySize from the WINDOW's client
+        // rect, and the window is not the picture: SSE Display Tweaks'
+        // borderless upscale renders 1920x1080 into a 3840x2160 window, so the
+        // backend's answer was twice the render target. Reported against the
+        // quick wheel -- drawn at double size and pushed off the bottom right
+        // -- because the wheel builds its OWN ImGui frame and was the one that
+        // never overruled it. Hence a function: two frames, one answer.
+        // ★Must run AFTER the backend's NewFrame and BEFORE ImGui::NewFrame.
+        // Earlier and the backend overwrites it; later and the frame has
+        // already been laid out against the wrong size.
+        const auto screenSize = RE::BSGraphics::Renderer::GetScreenSize();
+        auto& io = ImGui::GetIO();
+        io.DisplaySize.x = static_cast<float>(screenSize.width);
+        io.DisplaySize.y = static_cast<float>(screenSize.height);
+    }
+
     bool IsConsoleOpen()
     {
         auto* ui = RE::UI::GetSingleton();
@@ -4062,15 +4629,33 @@ namespace FUI::UIRoot
     void SetVanillaKey(int a_scancode) { g_vanillaKey.store(a_scancode); }
     int  VanillaKey() { return g_vanillaKey.load(); }
 
+    // Test switch, not a setting: see UIRoot.h.
+    std::atomic<bool> g_npcVanilla{ false };
+    bool NpcVanilla() { return g_npcVanilla.load(); }
+    void SetNpcVanilla(bool a_on)
+    {
+        g_npcVanilla.store(a_on);
+        if (a_on) {
+            SKSE::log::warn("[UI] ★!npcvanilla -- a FOLLOWER's trade container "
+                            "will open the ENGINE's window, not ours. Every "
+                            "other screen is unchanged.");
+        }
+    }
+
     void Render()
     {
         if (!g_initialized.load()) return;
         // The book the player just right-clicked is a real Scaleform menu
         // UNDER our overlay. Skip the whole frame (not just the windows) so
         // nothing of ours is drawn and no ImGui state is touched meanwhile.
-        if (IsBookOpen()) {
-            if (!g_bookWasOpen) {
-                g_bookWasOpen = true;
+        // ★★The book was the first thing that ever needed us off the screen
+        // while staying open, and everything it does here is what SUPPRESSION
+        // needs too -- so the book is now one reason among others rather than
+        // a case of its own. (UIRoot.h has the message contract; the tutorial
+        // popup and the engine MessageBox arrive through it.)
+        if (IsBookOpen() || IsSuppressed()) {
+            if (!g_hiddenWas) {
+                g_hiddenWas = true;
                 // ★The click that opened the book never gets its release here
                 // (our input relay stands down too), so queue one. Without it
                 // ImGui resumes with the button still down and the first
@@ -4087,11 +4672,20 @@ namespace FUI::UIRoot
                 // that opens over us.
                 SetGameCursorVisible(true);
             }
+            // (1.5.x) the shelf page still answers E -- see the input sink --
+            // but draws no chip of ours: a drawn prompt over the engine's
+            // page read as foreign (user call), and the HUD channel is held
+            // back while a menu is up. The gesture is the book's own, and
+            // regulars know it from the world's pages.
             return;
         }
-        if (g_bookWasOpen) {
+        if (g_hiddenWas) {
             // ★back to us: MouseHandler takes the cursor again from here on
-            g_bookWasOpen = false;
+            g_hiddenWas = false;
+            // ★(1.5.x) the page just closed: if E flagged a shelf take while
+            // it was up, this is where the transfer starts (render thread,
+            // like every other request)
+            LootBarter::ProcessShelfBookTake();
         }
 
         // ★★The console just came up. Keys stop reaching us from this frame on
@@ -4124,14 +4718,30 @@ namespace FUI::UIRoot
         ImGui_ImplWin32_NewFrame();
 
         auto& io = ImGui::GetIO();
-        // B11(P2): queried per frame — a once-cached size went stale after a
-        // borderless/fullscreen switch and desynced from OnShow's park math
-        const auto screenSize = RE::BSGraphics::Renderer::GetScreenSize();
-        io.DisplaySize.x = static_cast<float>(screenSize.width);
-        io.DisplaySize.y = static_cast<float>(screenSize.height);
-        // H′: crisp text at any scale — 1.0 when baked; a live bitmap-scale
-        // preview only while the slider is mid-drag
-        io.FontGlobalScale = Theme::Scale() / g_bakedScale;
+        SyncDisplaySize();
+        // ★★H′: THE text-size setting, applied to every string ImGui sizes.
+        //
+        // 1.92 rounds this product to whole pixels and then rasterises the
+        // glyphs at that size on demand (ImFont::GetFontBaked), so the text is
+        // crisp at any setting and a drag only ever asks for the dozen-odd
+        // integer sizes the range contains. There is no atlas rebuild here and
+        // no bitmap blit -- the old comment about scaled hangul smearing
+        // belongs to the fixed-size atlas this predates.
+        //
+        // ★io.FontGlobalScale is the pre-1.92 spelling of this and is left at
+        // 1: imgui asserts if both are set, and only one of them should ever
+        // be the answer to "how big is the text".
+        // ★★The OTHER half of the setting is Theme::SnapPx, which carries it
+        // for the strings we size ourselves. Both are live, so they move
+        // together -- when only one of them moved, the panel drew itself at
+        // two sizes at once and the strings looked doubled.
+        ImGui::GetStyle().FontScaleMain = Theme::FontScale();
+        io.FontGlobalScale = 1.0f;
+        // the atlas still carries the DISPLAY scale, so a display change (and
+        // a language pack's glyph ranges) still asks for a rebuild
+        if (std::fabs(Theme::Scale() - g_bakedScale) > 0.005f) {
+            g_fontsDirty.store(true);
+        }
 
         MouseHandler();
         ScrollHandler();
@@ -4156,13 +4766,29 @@ namespace FUI::UIRoot
         {
             static int      s_wantFrames = 0;
             static unsigned s_charsAtFocus = 0;
+            static unsigned s_keysAtFocus = 0;
             static bool     s_said = false;
             if (io.WantTextInput) {
                 if (s_wantFrames == 0) {
                     s_charsAtFocus = g_wmCharSeen.load(std::memory_order_relaxed);
+                    s_keysAtFocus  = g_wmKeySeen.load(std::memory_order_relaxed);
                 }
                 ++s_wantFrames;
+                // ★★AND ONLY IF THEY WERE TYPING. "No characters in two seconds"
+                // was read as a dead road, and it is also what a person looks
+                // like while they think -- click a number field in EDIT, pause,
+                // and this fired at ERROR level on ordinary behaviour (measured
+                // 2026-09-02: `chars 2 keys 5`, the road plainly alive).
+                //
+                // ★The keystroke count is the missing half, and it was already
+                // being PRINTED here. Both faults this watches for -- the road
+                // gone, or the characters taken upstream -- can only show
+                // themselves while keys are arriving. No keys is not a fault;
+                // it is somebody deciding what to type. Requiring the keys to
+                // have moved makes the line rarer and every instance of it
+                // real, which is the point of logging it at all.
                 if (s_wantFrames == 120 && !s_said &&
+                    g_wmKeySeen.load(std::memory_order_relaxed) > s_keysAtFocus &&
                     g_wmCharSeen.load(std::memory_order_relaxed) == s_charsAtFocus) {
                     s_said = true;
                     // ★`msgs` is the liveness signal: it counts EVERY message
@@ -4263,6 +4889,148 @@ namespace FUI::UIRoot
         // -- refreshed HERE because this tick runs on the main thread in both
         // worlds (the update hook unpaused, AdvanceMovie paused).
         DeltaWatch::RefreshMenuSnapshot();
+        // ★★★THE SAFETY NET, and suppression is not safe without it.
+        //
+        // Whoever suppressed us is expected to send kShow when their window
+        // closes. If they forget -- or if the engine ever means "close" by a
+        // kHide we answered with a hide -- we would sit here open, invisible
+        // and PAUSING THE GAME. That is a soft lock, so it cannot depend on
+        // anyone else's good manners.
+        //
+        // The test is simply whether anything is still up that could have
+        // wanted us out of the way. Whoever suppressed us had a window; if no
+        // window but the permanent furniture remains, nobody is there any
+        // more and we come back. The grace lets a mod close one window and
+        // open the next without us flashing in between.
+        // ★Before the net looks at anything: a client's request parked on
+        // another thread becomes real HERE, where the engine is safe to read.
+        ApplyPendingClientSuppress();
+        if (IsSuppressed() && IsSuppressedByClient()) {
+            // ★★★A CLIENT THAT ASKED BY NAME IS NOT A CLIENT THAT FORGOT.
+            //
+            // The stack test below is structurally blind to it, and that was
+            // measured rather than argued: the author of Fitting Room / Menu
+            // Studio timed six suppressions and the net revoked every one of
+            // them 166-341ms in, always with "nothing left above us". Their
+            // editor is a Flick overlay, not a registered menu, so it never
+            // appears in the menu map at all -- "nothing above us" was true
+            // from the first frame, and no test over that map can ever say
+            // otherwise. The net was right about the stack and wrong about
+            // the screen.
+            //
+            // ★★AND NO TIMER EITHER, which took one more round to see. The
+            // first version kept a ten-minute backstop here on the grounds
+            // that a client dying while holding this would strand the player.
+            // It would -- but nobody sits in front of a frozen game for ten
+            // minutes. Two is where people reach for the task manager. So the
+            // timer could not reach the case it was written for, and the only
+            // thing it could still reach was a LEGITIMATE session that ran
+            // long, which it would end for no reason. A safety net that
+            // cannot arrive in time is not a safety net; it is a bug with an
+            // alibi.
+            //
+            // So the hold is absolute, and the client owns every exit path of
+            // its own window (checklist 6-1: the same pairing rule as an
+            // injected key's IsUp). Ours are still ours: our close, a save
+            // load and a new game all take it back.
+            //
+            // ★And ONE test remains, which is not a timer: a hold cannot
+            // outlive the session it was taken over. OnClose answers the
+            // ordinary close, but a menu torn down without a kForceHide would
+            // leave the hold standing, and the next open would come up
+            // invisible and unreachable for good. This is a structural
+            // question, not a clock, so it costs the client nothing and
+            // answers within one tick.
+            if (!IsSessionOpen()) {
+                Suppress(false, "the session it was held over is gone",
+                         SuppressBy::kOverride);
+            }
+        } else if (IsSuppressed()) {
+            // ★★A NAME LIST WOULD HAVE BEEN WRONG, and the first measurement
+            // said so: a real session had BTPS, TrueHUD and SegmentedHUD open
+            // the whole time. Any list I could write would go stale the next
+            // time somebody installs a HUD mod I have never heard of, and a
+            // stale entry here disables the net silently.
+            //
+            // So ask a PROPERTY instead. A window that wanted us out of the
+            // way is a window the player is interacting with -- it takes the
+            // cursor, pauses the game, or is modal. A HUD overlay does none of
+            // those, whoever wrote it.
+            static constexpr std::string_view kOurs[] = {
+                "GridInventoryMenu", "GridWheelerMenu", "Cursor Menu",
+            };
+            bool blocker = false;
+            if (auto* ui = RE::UI::GetSingleton()) {
+                for (const auto& [name, entry] : ui->menuMap) {
+                    if (!ui->IsMenuOpen(name)) continue;
+                    if (std::find(std::begin(kOurs), std::end(kOurs),
+                                  std::string_view(name.c_str())) !=
+                        std::end(kOurs)) {
+                        continue;
+                    }
+                    const auto m = ui->GetMenu(name);
+                    if (!m) continue;
+                    if (m->UsesCursor() || m->PausesGame() || m->Modal()) {
+                        blocker = true;
+                        break;
+                    }
+                }
+            }
+            // ★...and a hard backstop regardless, because a window we cannot
+            // see in the menu map (a mod drawing without registering one) must
+            // not be able to strand us either.
+            constexpr int kGrace   = 20;      // ~0.3s: covers a window swap
+            constexpr int kBackstop = 60 * 60;   // ~1 min of being nobody's guest
+            ++g_suppressTicks;
+            if ((!blocker && g_suppressTicks > kGrace) ||
+                g_suppressTicks > kBackstop) {
+                Suppress(false, !blocker ? "nothing left above us" : "backstop",
+                         SuppressBy::kOverride);
+            }
+        }
+        // ★★★GI83: THE SECOND NET — A SESSION THAT ENDED WITHOUT SAYING SO.
+        //
+        // kHide SUPPRESSES rather than closes, which is right: it is the
+        // courtesy every overlay sends. But the engine can then take the menu
+        // OFF THE STACK without ever sending kForceHide, and kForceHide is the
+        // only thing that reaches OnHide -- so the whole close never ran.
+        //
+        // Two reporter CTDs (1.5.1 and 1.6.1) have the identical shape:
+        //     [SUPPRESS] on (kHide, engine)
+        //     [INV] session over            <- MenuCloseEchoTick's own test, so
+        //                                      the menu was CLOSED and the game
+        //                                      UNPAUSED, while m_running stayed
+        //                                      true and m_session never moved
+        //     ...the next open logs NEITHER "Begin3D" NOR "Begin3D SKIPPED",
+        //        i.e. Begin() returned at `if (m_running)`. Our Begin3D was
+        //        left outstanding ACROSS a vanilla InventoryMenu open/close --
+        //        and that menu drives the very same Inventory3DManager.
+        //     ...every capture after it: "model ready, capture empty".
+        //     ...and the eventual real close called End3D on a scene the engine
+        //        had already taken apart.
+        //
+        // ★The loadedModels guards cannot see this and never could: their
+        // entries still look perfect (radius 31.2 in both logs). The fault is
+        // one level up, at the SCENE, and the only cure is not to leave a
+        // session open behind a menu that is gone.
+        //
+        // ★The same question is already asked one screen up, for the client
+        // suppression hold: "a hold cannot outlive the session it was taken
+        // over". It was simply never asked about the session itself.
+        //
+        // ★Structural, not a timer. Self-limiting: the close clears m_running,
+        // so one leak costs one firing. The three ticks are for a frame where
+        // the menu map is mid-update, not a grace for anybody's manners.
+        if (ItemPreview::GetSingleton()->IsRunning() && !IsSessionOpen()) {
+            if (++g_orphanTicks >= 3) {
+                g_orphanTicks = 0;
+                SKSE::log::warn("[UI] the menu left the stack without a close -- "
+                                "ending the session from the tick (GI83)");
+                GridInventoryMenu::CloseSession("gone from the stack, no kForceHide");
+            }
+        } else {
+            g_orphanTicks = 0;
+        }
         Grid::ProcessBookRead();   // raise the Book Menu OUTSIDE the render pass
         Grid::ProcessFavorites();  // GI32: favourites, same reason
         Grid::ProcessRecharge();   // (1.3.1) soul-gem recharge, same reason
@@ -4272,8 +5040,9 @@ namespace FUI::UIRoot
         // the costume dresses whatever is worn. Coalesced -- a full set change
         // fires many equip events and DoReset3D rebuilds the whole actor.
         Costume::Tick();
-        // Second ring: notices when the ring has left the inventory behind our
-        // back (sold, dropped, taken by a script) and stands the carrier down.
+        // Second ring: keeps the "at most one worn ring holds kRing" invariant
+        // -- hands a bit back when its ring leaves, separates a pair a load put
+        // back into contest. Costs one bool test while nothing is out.
         DualRing::Tick();
         LootBarter::ProcessTransfers();   // loot take/store OUTSIDE the render pass
         Grid::ProcessTrashDeletes();      // F2: confirmed deletions (engine RemoveItem)

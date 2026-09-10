@@ -40,6 +40,24 @@ namespace FUI::WornLedger
                              a_obj->Is(RE::FormType::Ammo));
         }
 
+        // ★★★AMMO IS POOLED, AND THE POOL IS NOT STABLE.
+        //
+        // Everything else here is one entry per worn LIST, and for everything
+        // else that holds. Arrows do not: the engine merges them, so equipping
+        // three tilefuls can leave one worn list of 200 or three of 99/49/52 --
+        // both measured, in the same session. A ledger counting entries against
+        // a list count that moves on its own can only ever be wrong.
+        //
+        // So an ammo form gets ONE entry, units summed, and the audit asks
+        // whether the quiver is on the back rather than how many lists it took
+        // to say so. The count itself is the engine's to keep; the board reads
+        // it there (Equip.cpp sums the worn lists for the doll).
+        [[nodiscard]] bool IsAmmo(RE::FormID a_form)
+        {
+            auto* f = RE::TESForm::LookupByID(a_form);
+            return f && f->Is(RE::FormType::Ammo);
+        }
+
         bool TrackedForm(RE::FormID a_form)
         {
             auto* form = RE::TESForm::LookupByID(a_form);
@@ -92,12 +110,69 @@ namespace FUI::WornLedger
             }
             return out;
         }
+
+        const char* StateName(State a_s)
+        {
+            switch (a_s) {
+            case State::pending:  return "pending";
+            case State::doffing:  return "doffing";
+            default:              return "worn";
+            }
+        }
+
+        // ★★★NAME WHAT DRIFTED, not just how far.
+        //
+        // The audit reported "ledger 10 vs engine 1" and stopped there, and
+        // four sessions of that produced no diagnosis at all: a count cannot
+        // say WHICH ten, and the drift never survives the audit that finds it
+        // (the bend below rewrites the books). ★The ledger has carried uid,
+        // sig, hand and a timestamp since B4-2b for exactly this reason --
+        // identity plus a lifecycle -- and the one place it mattered was
+        // printing counts. So a mismatch now prints both sides in full.
+        //
+        // ★★AGE IS THE PART THAT ACCUSES. Entries that all arrived within a
+        // second of each other are one burst -- a loadout apply, a costume
+        // swap, a quiver going on. Entries spread over minutes are a slow
+        // leak: worn entries never expire (only pending and doffing do), so a
+        // single missed unequip event sits in the books until the next audit
+        // bends them, and the shape "many ledger, one engine" is what a leak
+        // that cannot self-heal looks like after a long session.
+        void ReportForm(const char* a_when, RE::FormID a_form,
+                        const std::vector<Entry>& a_engine)
+        {
+            const auto now = std::chrono::steady_clock::now();
+            for (const auto& e : g_entries) {
+                if (e.form != a_form) continue;
+                const auto age = std::chrono::duration_cast<std::chrono::milliseconds>(
+                                     now - e.when).count();
+                logger::warn("[WORN] @{}   ledger: {} uid {:04X} sig {:04X} "
+                             "hand {} units {} age {}ms", a_when,
+                             StateName(e.state), e.uid, e.sig, e.hand,
+                             e.units, age);
+            }
+            for (const auto& e : a_engine) {
+                if (e.form != a_form) continue;
+                logger::warn("[WORN] @{}   engine: uid {:04X} sig {:04X} "
+                             "hand {} units {}", a_when, e.uid, e.sig,
+                             e.hand, e.units);
+            }
+        }
     }
 
     void NotePending(RE::FormID a_form, std::uint16_t a_uid, std::uint16_t a_sig,
                      int a_hand, int a_units)
     {
         if (!g_have || !TrackedForm(a_form)) return;
+        // ★A second quiverful joins the one already spoken for -- the engine
+        // will pool them and a second entry would have nothing to answer to.
+        if (IsAmmo(a_form)) {
+            for (auto& e : g_entries) {
+                if (e.form != a_form) continue;
+                e.units += (std::max)(1, a_units);
+                e.when   = std::chrono::steady_clock::now();
+                return;
+            }
+        }
         Entry e;
         e.form  = a_form;
         e.uid   = a_uid;
@@ -109,17 +184,6 @@ namespace FUI::WornLedger
         g_entries.push_back(std::move(e));
     }
 
-    void CancelPending(RE::FormID a_form)
-    {
-        if (!g_have) return;
-        for (auto it = g_entries.begin(); it != g_entries.end(); ++it) {
-            if (it->form == a_form && it->state == State::pending) {
-                g_entries.erase(it);
-                return;
-            }
-        }
-    }
-
     void OnEquip(RE::FormID a_form)
     {
         if (!g_have || !TrackedForm(a_form)) return;
@@ -129,6 +193,17 @@ namespace FUI::WornLedger
         // first, which is also the order the engine ran them.
         for (auto& e : g_entries) {
             if (e.form == a_form && e.state == State::pending) {
+                e.state = State::worn;
+                e.when  = std::chrono::steady_clock::now();
+                return;
+            }
+        }
+        // ★An ammo form already accounted for stays ONE entry: the engine
+        // pooled the arrivals, so a second event about the same quiver is the
+        // same quiver, not another one.
+        if (IsAmmo(a_form)) {
+            for (auto& e : g_entries) {
+                if (e.form != a_form) continue;
                 e.state = State::worn;
                 e.when  = std::chrono::steady_clock::now();
                 return;
@@ -184,6 +259,15 @@ namespace FUI::WornLedger
     void OnUnequip(RE::FormID a_form)
     {
         if (!g_have || !TrackedForm(a_form)) return;
+        // ★A QUIVER COMES OFF WHOLE. The ammo unequip takes every worn list
+        // in one action, and the engine may report that as one event or
+        // several; either way what is left on the back is nothing, so the
+        // form's single entry retires rather than being decremented by a
+        // count nobody can pair up.
+        if (IsAmmo(a_form)) {
+            std::erase_if(g_entries, [&](const Entry& e) { return e.form == a_form; });
+            return;
+        }
         // ★Doffing entries retire FIRST: an unequip we asked for answers our
         // own request before it answers anything else -- the same rule the
         // container ledger runs on (a confirmation retires its own entry).
@@ -223,7 +307,7 @@ namespace FUI::WornLedger
             return;
         }
         const auto engine = EngineWalk();
-        const auto eByForm = CountByForm(engine, State::worn);
+        auto       eByForm = CountByForm(engine, State::worn);
         // ★doffing counts WITH worn here: the engine still wears a unit whose
         // unequip is in flight, so the audit must expect it on both sides
         std::map<RE::FormID, int> lByForm;
@@ -233,6 +317,13 @@ namespace FUI::WornLedger
             }
         }
 
+        // ★PRESENCE, NOT COUNT, FOR AMMO. See IsAmmo: the engine's list
+        // count for a quiver moves on its own, so comparing it to anything is
+        // comparing to noise. Both sides collapse to "on the back or not",
+        // which is the question that has an answer.
+        for (auto& [f, n] : eByForm) if (IsAmmo(f) && n > 0) n = 1;
+        for (auto& [f, n] : lByForm) if (IsAmmo(f) && n > 0) n = 1;
+
         int bad = 0;
         for (const auto& [f, n] : eByForm) {
             const auto it = lByForm.find(f);
@@ -241,6 +332,7 @@ namespace FUI::WornLedger
                 ++bad;
                 logger::warn("[WORN] @{} MISMATCH {:08X} '{}': ledger {} vs "
                              "engine {}", a_when, f, NameOf(f), mine, n);
+                ReportForm(a_when, f, engine);
             }
         }
         for (const auto& [f, n] : lByForm) {
@@ -248,6 +340,7 @@ namespace FUI::WornLedger
                 ++bad;
                 logger::warn("[WORN] @{} MISMATCH {:08X} '{}': ledger {} vs "
                              "engine 0", a_when, f, NameOf(f), n);
+                ReportForm(a_when, f, engine);
             }
         }
 

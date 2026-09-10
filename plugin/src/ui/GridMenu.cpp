@@ -1,9 +1,10 @@
-// SPDX-License-Identifier: GPL-3.0-or-later
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
 // SPDX-FileCopyrightText: 2026 Smooth <skypia0147-dev@users.noreply.github.com>
 // SPDX-FileCopyrightText: 2026 Lorkhan RP
 // Portions SPDX-FileCopyrightText: patchulidev (Modex / ModExplorerMenu)
 // Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
 
+#include "ui/GridMenu.h"
 #include "ui/GridMenu.h"
 #include "game/Census.h"
 #include "game/DeltaWatch.h"
@@ -125,6 +126,19 @@ namespace FUI
         // engine's arrow is what a pad should be moving, so it has to stay up
         // for that path to work at all.
         if (!UIRoot::WantsGameCursor()) return;
+        // ★★★NOT WHILE THE CONSOLE IS UP. Measured: toggling the console with
+        // our menu open destroys CursorMenu and remakes it -- the movie comes
+        // back at a new address every time -- and this function, seeing it
+        // closed, asks for it again. So every frame the engine took the arrow
+        // away we handed it straight back, MouseHandler hid it, and the next
+        // frame did it again. That blink is a second cursor appearing and
+        // vanishing on the console's edges (user report).
+        //
+        // The probe that settled it: `visible=1 -> after hide 0`, frame after
+        // frame. Our hide was working perfectly; we were the ones turning it
+        // back on. The console owns the screen while it is up -- stop fighting
+        // it, and pick the pointer back up when it leaves.
+        if (UIRoot::IsConsoleOpen()) return;
         if (auto* ui = RE::UI::GetSingleton(); ui && !ui->IsMenuOpen(RE::CursorMenu::MENU_NAME)) {
             SKSE::GetTaskInterface()->AddUITask([]() {
                 if (const auto mq = RE::UIMessageQueue::GetSingleton()) {
@@ -218,6 +232,11 @@ namespace FUI
     void GridInventoryMenu::OnShow()
     {
         g_closeSfxPlayed = false;
+        // ★The museum sweep, taken HERE and only here. Donating requires
+        // closing the inventory, so a reading taken as the menu opens cannot go
+        // stale while it is up -- and the alternative, resolving a reference
+        // handle per tile per frame, is the cost this avoids.
+        FUI::Lotd::Refresh();
         // ★1.4/B0: the strongest test in the whole step. Everything that
         // happened while the menu was SHUT had to arrive as events; if the
         // running total disagrees with a fresh count here, the engine does not
@@ -237,6 +256,10 @@ namespace FUI
         // B4-2 observation: did the worn ledger stay in step with the engine
         // across the closed-menu stretch on events alone?
         FUI::WornLedger::Audit("menu-open");
+        // A save from before the doll-favorite fix can carry a phantom
+        // {Hotkey}-only list (one item drawn as two). Retired here, once
+        // per open, before the board reads the entry.
+        FUI::Grid::HealPhantomHotkeyLists();
         // ★B2 flushes on OPEN, not on close. Closing the menu right after a
         // request reported it outstanding at ONE frame old -- the confirmation
         // was simply still in flight. Waiting until the next open gives every
@@ -255,6 +278,23 @@ namespace FUI
             Sfx::MenuClose();
         }
         g_closeSfxPlayed = false;
+        CloseSession("kForceHide");
+    }
+
+    // ★★★GI83: THE CLOSE, MINUS THE SOUND, WITH NO INSTANCE NEEDED.
+    //
+    // This body used to live inside OnHide, and OnHide is reached from exactly
+    // one message: kForceHide. kHide suppresses instead (see ProcessMessage,
+    // and it is right to) -- but the engine can take the menu OFF the stack
+    // without sending either, and then NOTHING here ran: no reconcile, no
+    // census take, no worn audit, and no ItemPreview::End. The last one is
+    // what costs a crash; the rest is why the next open reads "surplus 3" and
+    // "1 plain loss" against a baseline from a session that never closed.
+    //
+    // So the work is named, and the tick's orphan net can ask for it.
+    void GridInventoryMenu::CloseSession(const char* a_why)
+    {
+        SKSE::log::info("[UI] session closing ({})", a_why ? a_why : "-");
         // ...and this one covers the session itself: our own actions, which we
         // are supposed to know about exactly.
         FUI::DeltaWatch::Reconcile("menu-close");
@@ -313,15 +353,42 @@ namespace FUI
             }
             break;
         }
+        // ★★★THREE MESSAGES, THREE MEANINGS (contract in UIRoot.h).
+        //
+        // kHide used to be our close, and closing runs the whole session
+        // teardown -- the trash is emptied, the loot session ends, the carry
+        // is put down, ui.ini is written. But kHide is also the courtesy every
+        // other mod sends to put a window over a menu, and answering it with
+        // that teardown is why a MessageBox over the grid throws the player
+        // out of the chest they were standing at, and why an overlay mod
+        // could not sit on top of us at all (reported by the author of
+        // Fitting Room / Menu Studio).
+        //
+        // So kHide SUPPRESSES: we stay open, stop drawing, stop listening,
+        // and everything the session holds survives. kForceHide -- the
+        // engine's own "close, no negotiation" -- is our close now, and
+        // UIRoot::Close() sends it.
         case RE::UI_MESSAGE_TYPE::kShow:
+        case RE::UI_MESSAGE_TYPE::kReshow:
+            UIRoot::Suppress(false, "kShow");
             OnShow();
             break;
         case RE::UI_MESSAGE_TYPE::kHide:
+            UIRoot::Suppress(true, "kHide");
+            return RE::UI_MESSAGE_RESULTS::kHandled;   // ...and STAY on the stack
+        case RE::UI_MESSAGE_TYPE::kForceHide:
             OnHide();
             break;
         case RE::UI_MESSAGE_TYPE::kScaleformEvent: {
-            // ditto for the mouse/keys relay: the book owns input while it is up
-            if (UIRoot::IsBookOpen()) break;
+            // ★★★A SUPPRESSED MENU MUST NOT EAT THE INPUT ITS GUEST NEEDS.
+            //
+            // Returning kHandled below stops the event dead: nothing under us
+            // ever sees it. That is right while we are on screen and wrong the
+            // instant we are not -- the poison confirm box appeared with the
+            // grid correctly hidden and could not be clicked, because every
+            // mouse event was still being swallowed here. The book has always
+            // broken out for exactly this reason; suppression joins it.
+            if (UIRoot::IsBookOpen() || UIRoot::IsSuppressed()) break;
             auto* scaleformData = reinterpret_cast<RE::BSUIScaleformData*>(a_message.data);
             if (scaleformData && scaleformData->scaleformEvent) {
                 ProcessScaleformEvent(scaleformData);

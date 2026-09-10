@@ -38,6 +38,7 @@ namespace FUI::Lang
         X(Edit, "EDIT")                                                                                     \
         X(Settings, "SETTINGS")                                                                             \
         X(ScaleLabel, "SCALE")                                                                        \
+        X(FontScaleLabel, "TEXT SIZE")   /* player's font multiplier over the automatic scale */      \
         X(SkinLabel, "SKIN")                                                                                \
         X(LanguageLabel, "LANGUAGE")                                                                        \
         X(Gold, "GOLD")                                                                                     \
@@ -67,6 +68,7 @@ namespace FUI::Lang
         X(ArmorLight, "Light Armor")   /* tooltip armour class (feedback ⑪) */                              \
         X(ArmorHeavy, "Heavy Armor")                                                                        \
         X(ArmorClothing, "Clothing")                                                                        \
+        X(Warmth, "Warmth")   /* Survival Mode armour rating (feedback, 1.6.1) */                           \
         X(Weight, "Weight")                                                                                 \
         X(Value, "Value")                                                                                   \
         X(SlotHead, "Head")                                                                                 \
@@ -146,6 +148,9 @@ namespace FUI::Lang
         X(TakeLabel, "Take")   /* slider action labels */                                                   \
         X(StoreLabel, "Store")                                                                              \
         X(SplitLabel, "Split")                                                                              \
+        X(DropLabel, "Drop")   /* (1.5.x) R on a stack asks how many */                                     \
+        /* (1.5.x) a whole-cell take that only partly fit -- the rest stayed put */                         \
+        X(TookWhatFit, "Took what fit - the rest stayed behind")                                            \
         X(EquippedLabel, "Equipped")   /* shift-compare card */                                             \
         X(HintTakeAll, "R  Take all")                                                                        \
         X(PrecacheLabel, "PRECACHE ALL")                                                                    \
@@ -203,6 +208,15 @@ namespace FUI::Lang
         X(ActRead, "read")                                                                                  \
         X(ActReread, "read again")                                                                          \
         X(BookRead, "Read")                                                                                 \
+        /* ★LOTD'S OWN WORD, counted in its plugin rather than guessed: "on     \
+           display" 50 times, "displayed" 46, and "donate" never once in a      \
+           string a player reads. Its own messages are DBM_SetDisplayedMessage  \
+           and DBM_SetDisplayedDoneMessage, and its dialogue says "the item is  \
+           not on display" in as many words. It is also what we actually        \
+           MEASURE -- the pedestal's reference being enabled -- so it stays     \
+           true for a relic that was handed in but never put out. */            \
+        X(MuseumOwed, "Unexhibited")   /* LOTD relic still owed */                                          \
+        X(MuseumDone, "Exhibited")     /* already on a pedestal */                                          \
         X(ActLearn, "learn")                                                                                \
         X(ActSell, "sell")                                                                                  \
         X(ActStoreIn, "store")                                                                              \
@@ -218,6 +232,10 @@ namespace FUI::Lang
         X(ActUnequip, "unequip")   /* GI63: potions, food and poisons are drunk/eaten, not worn... */       \
         X(ActUse, "use")                                                                                    \
         X(ActDrop, "drop")                                                                                  \
+        /* ★Distinct from ActDrop: that one puts the item on the ground,                            \
+           this one puts it in the open bin. Two disposals, and a player                            \
+           reading one word must not have to guess which. */                                        \
+        X(ActTrash, "discard")   /* RMB while the trash window is open */                           \
         X(ActFavorite, "favorite")                                                                          \
         X(ActRecharge, "recharge")   /* (1.3.1) T on an enchanted weapon that is not full */                \
         X(ActSplit, "split")                                                                                \
@@ -264,7 +282,9 @@ namespace FUI::Lang
         X(WheelKeyPress, "press keys...")   /* ...and hold as many as you want */                   \
         X(WheelGroup, "group")   /* quick menu: mouse up/down moves between the two fans */          \
         X(WheelPick, "pick")                                                                        \
-        X(WheelApply, "release to apply")
+        X(WheelApply, "release to apply") \
+        X(WheelPage, "page")   /* quick menu: W/S, only shown when there IS another page */ \
+        X(WheelClose, "press again to close")   /* ...when a TAP left it standing */
 
     enum class Str : int
     {

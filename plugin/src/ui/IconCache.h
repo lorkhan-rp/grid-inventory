@@ -148,6 +148,24 @@ namespace FUI
         // costs nothing and says which threads meet here.
         mutable std::atomic<int> m_tick{ 0 };
 
+        // ---- post-load warm-up (first-open latency) ------------------------
+        // Queue forms whose PAK sprite should be made resident before the
+        // first menu open. Serviced from TrimToBudget -- the once-a-tick spot
+        // that already owns m_icons outside the draw -- at a deliberately
+        // gentle rate: a short grace after the load (the load spike is the
+        // worst moment to add I/O on a slow machine), then at most
+        // kWarmPerTick pak restores per tick. Pak reads ONLY, never a
+        // capture: warm-up must be safe with no menu and no engine scene.
+        // Forms are kept as FormIDs (원칙 2) and re-resolved at service time.
+        void QueueWarm(std::vector<RE::FormID> a_forms);
+        void SetWarmEnabled(bool a_on) { m_warmEnabled = a_on; }
+        [[nodiscard]] bool WarmEnabled() const { return m_warmEnabled; }
+        // Widen the refill allowance for the next a_frames ticks. Called at
+        // menu open: a screenful of pak sprites lands during the open
+        // transition (already a covered moment) instead of trickling in at
+        // kRefillPerFrame and reading as pop-in.
+        void Burst(int a_frames) { m_burstFrames = (std::max)(m_burstFrames, a_frames); }
+
         [[nodiscard]] bool        IsBusy() const { return m_pendingBusy || !m_queue.empty(); }
         [[nodiscard]] const Icon* Get(RE::TESBoundObject* a_obj) const;   // resolves def internally
         [[nodiscard]] size_t      CachedCount() const { return m_icons.size(); }
@@ -172,6 +190,68 @@ namespace FUI
         // list may still reference the SRVs being released.
         // The retired stylized derivative is swept here too (GI60).
         void ResetDiskCache();
+
+        // ★★COUNT THE ARMOURS WHOSE PICTURE DEPENDS ON WHO IS WEARING IT.
+        //
+        // An icon key folds BOTH ground models of an armour together
+        // (ModelSlot32), so a record gets exactly ONE icon -- and the engine
+        // renders whichever sex the character capturing it happens to be. For
+        // the ~99% of armours whose two ground models are the same file that
+        // is invisible and correct. For the rest -- underwear, some bard and
+        // mage clothing -- the shipped pak hands every player the sex it was
+        // captured on. Reported against a male character seeing female models.
+        //
+        // The fix under consideration is to leave those records OUT of the
+        // shipped pak, so each install captures them on its own character.
+        // That is only sane if the number is small: every excluded record is a
+        // live capture the player waits for once. So it is measured before it
+        // is decided, and the count lands in every log we are ever sent.
+        // Main/game thread, after kDataLoaded (walks the form arrays).
+        void ReportSexSpecificArmour();
+
+        // ★★DOES THE ENGINE ALREADY KEEP A PICTURE FOR EACH SPELL?
+        //
+        // Reported: the wheel's magic side has no per-spell icon, so picking
+        // one means reading names, which gets slow as a spell list grows. Our
+        // icons are captures of a MODEL, and a spell has none -- but MDOB
+        // (BGSMenuDisplayObject) is a TESBoundObject the vanilla magic menu
+        // renders for that spell, and BOTH SpellItem and EffectSetting carry
+        // one. That is the same type this cache already captures, so if the
+        // coverage is there the whole feature is a resolution change rather
+        // than a new asset pipeline.
+        //
+        // Measured before it is built, the way the armour count was: a feature
+        // that works for a fifth of the spell list is worse than none, because
+        // the fifth that works teaches the player to expect it.
+        // Main/game thread, after kDataLoaded.
+        void ReportSpellDisplayObjects();
+
+        // ★★★AND SOMETHING HAS TO ASK FOR THEM, or the resolution above is
+        // machinery nobody ever starts.
+        //
+        // The capture engine runs inside the GRID's render pass -- taking a
+        // picture means standing a model in a 3D scene, and the wheel has no
+        // such scene (Wheeler's own comment says so where it queues). Items
+        // reach the queue because they are IN the bag being drawn. A spell
+        // never is: it is not inventory at all, so opening the bag would never
+        // meet one, and a spell icon would be queued by nobody and captured
+        // never.
+        //
+        // So the bag's opening is where the magic favourites are handed over:
+        // the exact set the wheel's magic group is built from (the engine's
+        // MagicFavorites), photographed in the one place that can, while the
+        // player is doing something else. Cheap and idempotent -- QueueCapture
+        // already drops anything cached or queued.
+        void QueueFavouriteSpells();
+
+        // ★Write the pak that goes to OTHER PEOPLE: this player's capture pak
+        // minus every icon whose picture depends on who was wearing it. Those
+        // records are then captured by each install on its own character,
+        // where the engine picks the right model for free -- one capture per
+        // record the player actually meets, appended to their own pak.
+        // Author tooling: drop GridInventory_makeshippingpak.txt beside the
+        // plugin and the next menu open writes it. Never called in play.
+        bool ExportShippingPak(const char* a_path);
 
         // GI47: preset icon bundle. Export copies our capture pak next to the
         // preset ini; import APPENDS the bundle's records behind our own --
@@ -269,7 +349,10 @@ namespace FUI
         // giveUp MECHANISM (callers own the policy of when): warn, unload,
         // release the pending slot, and escalate repeat offenders to the
         // PERSISTED permanent-fail list.
-        void GiveUpPending(const char* a_why);
+        // ★GI69: a_persist=false releases the slot and logs WITHOUT writing the
+        // key to the permanent fail list. The "deferred" verdicts need exactly
+        // that, and they did not have it -- see the note on the write itself.
+        void GiveUpPending(const char* a_why, bool a_persist = true);
 
         // ★The RESOLUTION lever is the model scale, not the box. The engine
         // renders the preview item at a size it chooses itself (~275px
@@ -305,6 +388,21 @@ namespace FUI
         // is touched, so filling a miss is not a change the caller can see.
         bool LoadFromDisk(std::uint64_t a_key) const;
         mutable int m_refillLeft = kRefillPerFrame;   // reset each TrimToBudget
+
+        // warm-up state (see QueueWarm)
+        std::deque<RE::FormID> m_warmQueue;
+        int                    m_warmDelay = 0;
+        int                    m_burstFrames = 0;
+        bool                   m_warmEnabled = true;
+        // ~3s at 60fps. TICKS, not seconds, on purpose: a slower machine
+        // ticks slower, so the machines the grace protects wait LONGER in
+        // real time (30fps = ~6s) while a fast one starts sooner -- the
+        // adaptation comes free. Was 5s nominal; measured, the player can
+        // reach the inventory in ~3.3s after a load, and the warm work is
+        // two small reads a tick, so meeting them earlier costs nothing.
+        static constexpr int kWarmDelayTicks = 180;
+        static constexpr int kWarmPerTick    = 2;     // pak restores per tick
+        static constexpr int kBurstRefill    = 128;   // open-transition allowance
         static void SaveToDisk(std::uint64_t a_key, int a_w, int a_h, std::uint32_t a_fmt,
                                const std::vector<std::uint8_t>& a_pixels);
 
@@ -330,6 +428,18 @@ namespace FUI
         // grow, shrink the MODEL instead: fewer pixels, but real ones.
         float m_captureShrink = 1.0f;
         static constexpr float kMinCaptureShrink = 0.4f;   // 2.5x -> 1.0x floor
+
+        // ★GI80: the INSPECT's own second rung. The C view was exempt from the
+        // shrink above on purpose -- m_captureShrink is the tile ladder's
+        // state, reset per queued item -- and so a model that overflowed the
+        // screen at 3x was baked with its ends sliced off: "the 3D preview has
+        // a bounding box that cuts off the top and bottom of long items"
+        // (zhenguoce, 1440p). The screen IS the bounding box: the capture reads
+        // backbuffer pixels and nothing past its edge exists to read.
+        // One factor per inspected item, only ever lowered while it is open, so
+        // a drag cannot make it oscillate; SetInspect starts the next item at 1.
+        float m_inspectShrink = 1.0f;
+        static constexpr float kMinInspectShrink = 0.33f;   // 3.0x -> 1.0x floor
 
         // Pixel style: derived sprites, keyed exactly like m_icons. Memory
         // only — re-deriving costs a pak read plus a downscale, which is
@@ -368,9 +478,20 @@ namespace FUI
         std::unordered_map<std::uint64_t, RE::TESBoundObject*> m_deferredObj;
         bool                                   m_slowLoaded = false;
         bool                                   m_retryPass = false;   // generous window
+        // ★GI69: how many times THIS SESSION a key has run out of window with
+        // the engine reporting no load. One such reading is not evidence -- see
+        // the verdict in CheckPendingGates. Deliberately not persisted: the
+        // question it answers is "did this already fail while I watched", and a
+        // restart is exactly when it deserves a clean look.
+        std::unordered_map<std::uint64_t, int> m_strikes;
+        // ★GI69: keys whose fail-list skip has already been reported. The skip
+        // is silent by design (it happens before anything is armed), which left
+        // a flat tile with nothing in the log to explain it.
+        std::unordered_set<std::uint64_t>      m_failNoted;
 
         void EnsureFailLoaded();               // lazy read of the persisted list
         void PersistFail(std::uint64_t a_key); // append one permanently-failed key
+        void NoteFailSkip(std::uint64_t a_key, RE::TESBoundObject* a_obj);
         void EnsureSlowLoaded();
         void PersistSlow(std::uint64_t a_key);
         void RewriteSlow();                    // after a retry resolves entries
