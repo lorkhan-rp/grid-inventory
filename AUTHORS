@@ -1,0 +1,50 @@
+Grid Inventory — titulaires de droits / copyright holders
+=========================================================
+
+Ce fichier nomme les titulaires. Il existe parce que la GPL-3.0 section 4 attend
+une notice de copyright sur chaque copie, et parce que EXCEPTIONS.txt accorde des
+permissions supplémentaires « by the licensors of this Program » : sans licensor
+nommé, cette exception n'a pas de concédant identifiable.
+
+This file names the copyright holders. GPL-3.0 section 4 expects a copyright
+notice on every copy, and EXCEPTIONS.txt grants additional permissions "by the
+licensors of this Program" — without a named licensor that exception has no
+identifiable grantor.
+
+
+La chaîne / The chain
+---------------------
+
+    patchulidev  ──►  Smooth  ──►  Lorkhan RP
+    (Modex)           (Grid Inventory)   (ce fork / this fork)
+
+1. **patchulidev** — Modex / ModExplorerMenu
+   https://github.com/patchulidev/ModExplorerMenu
+   GPL-3.0 avec exception modding. Six fichiers en sont portés :
+   plugin/src/ui/GridMenu.cpp, ui/GridMenu.h, ui/ItemPreview.cpp,
+   ui/ItemPreview.h, ui/UIRoot.cpp, game/Inv3D.h.
+   C'est de là que vient la GPL de ce projet.
+
+2. **Smooth** (skypia0147-dev) — Grid Inventory, l'amont de ce fork
+   https://github.com/skypia0147-dev/grid-inventory
+   Auteur de la quasi-totalité du code.
+
+3. **Lorkhan RP** — ce fork
+   https://github.com/lorkhan-rp/grid-inventory
+   Ajouts : plugin/src/net/ShellBridge.{cpp,h}, un mode « sans pause » pour le
+   multijoueur, et la traduction française livrée dans dist/.
+
+Crédit supplémentaire, cité dans le code mais pas dans CREDITS.md jusqu'ici :
+**cyfewlp** (SimpleIME) — le relais d'événements Scaleform vers ImGui,
+plugin/src/ui/GridMenu.cpp.
+
+
+Licence
+-------
+
+GPL-3.0-or-later (LICENSE-GPL), avec les permissions supplémentaires de
+EXCEPTIONS.txt (exception modding + permission section 7 pour les Modding
+Libraries).
+
+Les licences des bibliothèques tierces liées dans le binaire sont dans
+THIRD-PARTY-NOTICES.md.

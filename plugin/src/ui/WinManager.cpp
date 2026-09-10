@@ -1,4 +1,9 @@
-﻿#include "ui/IconCache.h"
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Smooth <skypia0147-dev@users.noreply.github.com>
+// SPDX-FileCopyrightText: 2026 Lorkhan RP
+// Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
+
+#include "ui/IconCache.h"
 #include "ui/Grid.h"
 #include "ui/GridMenu.h"
 #include "ui/Equip.h"

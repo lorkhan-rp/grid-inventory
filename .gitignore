@@ -13,6 +13,7 @@
 /plugin/*
 !/plugin/src/
 !/plugin/CMakeLists.txt
+!/plugin/CMakePresets.json
 !/plugin/vcpkg.json
 
 # --- docs shipped with the mod ---
@@ -39,6 +40,8 @@
 # --- repo files ---
 !/.gitignore
 !/README.md
+!/AUTHORS
+!/THIRD-PARTY-NOTICES.md
 
 # --- fork Lorkhan : traduction francaise livree avec notre addon ---
 !/dist/

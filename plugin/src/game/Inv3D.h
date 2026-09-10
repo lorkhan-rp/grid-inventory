@@ -1,3 +1,8 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Smooth <skypia0147-dev@users.noreply.github.com>
+// Portions SPDX-FileCopyrightText: patchulidev (Modex / ModExplorerMenu)
+// Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
+
 #pragma once
 
 // Inventory3DManager member functions absent from CommonLibSSE-NG (main).

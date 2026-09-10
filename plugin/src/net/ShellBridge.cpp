@@ -1,3 +1,7 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Lorkhan RP
+// Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
+
 #include "net/ShellBridge.h"
 
 #include "game/Ledger.h"

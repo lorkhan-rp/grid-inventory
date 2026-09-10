@@ -17,20 +17,39 @@ The plugin source is therefore distributed under **GPL-3.0** (see
   https://github.com/patchulidev/ModExplorerMenu
   - ImGui bootstrap / render-loop structure → `plugin/src/ui/UIRoot.cpp`
   - Item3DPreview backbuffer-capture pipeline (Inventory3DManager render →
-    save/clear/capture/restore) → `plugin/src/ui/ItemPreview.cpp`
+    save/clear/capture/restore) → `plugin/src/ui/ItemPreview.cpp`,
+    `plugin/src/ui/ItemPreview.h`
+  - The kCustomRendering menu and the Scaleform→ImGui input relay →
+    `plugin/src/ui/GridMenu.cpp`, `plugin/src/ui/GridMenu.h`
+  - Inventory3DManager REL wrappers → `plugin/src/game/Inv3D.h`
   - Individual files carry their own attribution headers.
     각 파일 상단에 출처 주석이 명기되어 있습니다.
 
+- **SimpleIME** by *cyfewlp* — the Scaleform event relay credited in
+  `plugin/src/ui/GridMenu.cpp`.
+
 ## Libraries / 라이브러리
 
-- **CommonLibSSE-NG** (CharmedBaryon) — MIT
+- **CommonLibSSE-NG** — `alandtse/CommonLibVR`, branch `ng`,
+  **GPL-3.0-or-later** with its own modding exception. This is the
+  dependency that makes this plugin copyleft: a plugin statically linking
+  CommonLibSSE NG forms a combined work with it. (Earlier revisions of this
+  file said "CharmedBaryon — MIT"; that was wrong on both counts.)
 - **Dear ImGui** (ocornut) — MIT
-- **spdlog / fmt** — MIT
+- **spdlog** (Gabi Melman) / **fmt** (Victor Zverovich) — MIT
+- **DirectXTK**, **DirectXMath** (Microsoft) — MIT
+- **rapidcsv** (Kristofer Berggren) — BSD-3-Clause
+- **OpenVR** (Valve) — BSD-3-Clause, via CommonLibVR
+- **MinHook / hde64** (Tsuda Kageyu) — BSD-2-Clause, via CommonLibVR
 - **SKSE** team
 - **Address Library for SKSE Plugins** (meh321) — the version-independent
   address resolution every `REL::ID` in this plugin rides on (runtime
   dependency; no files redistributed)
   / 버전 독립 주소 해석의 기반(런타임 의존, 파일 미동봉)
+
+Exact versions, upstream URLs and full licence texts for everything linked
+into the shipped DLL are in `THIRD-PARTY-NOTICES.md` — MIT and BSD both
+require their copyright notice to travel with binary distributions.
 
 ## Fonts / 폰트
 

@@ -8,6 +8,15 @@ pickpocketing share the same grid UI; icons are captured from each item's own
 This repository holds the **plugin source**. The mod itself (esp, meshes,
 sounds, icon pak) is distributed on Nexus Mods.
 
+> **This is a fork.** Upstream is
+> [skypia0147-dev/grid-inventory](https://github.com/skypia0147-dev/grid-inventory)
+> by **Smooth**, which itself ports code from
+> [Modex](https://github.com/patchulidev/ModExplorerMenu) by **patchulidev**.
+> The `main` branch here mirrors upstream exactly; the Lorkhan RP changes
+> live on the `server-shell` branch — a passive telemetry bridge
+> (`plugin/src/net/ShellBridge.*`), a no-pause menu mode for multiplayer, and
+> a French translation. See [AUTHORS](AUTHORS) for the full chain.
+
 - Feature overview: [README_EN.md](README_EN.md) · [README_KO.md](README_KO.md)
 - For mod authors — costume state signal: [API_COSTUME.md](API_COSTUME.md) · [API_COSTUME_KO.md](API_COSTUME_KO.md)
 
@@ -84,9 +93,18 @@ The header to copy is [`plugin/src/api/GridInventoryAPI.h`](plugin/src/api/GridI
 
 ## License
 
-The plugin source is distributed under **GPL-3.0** — see [LICENSE-GPL](LICENSE-GPL) —
-with the modding/linking exceptions in [EXCEPTIONS.txt](EXCEPTIONS.txt)
-(inherited unchanged from upstream Modex).
+The plugin source is distributed under **GPL-3.0-or-later** — see
+[LICENSE-GPL](LICENSE-GPL) — with the modding/linking exceptions in
+[EXCEPTIONS.txt](EXCEPTIONS.txt) (inherited unchanged from upstream Modex).
+
+Two dependencies make that copyleft unavoidable rather than chosen: the
+ported Modex code, and **CommonLibSSE-NG** (`alandtse/CommonLibVR`), which is
+itself GPL-3.0-or-later — a plugin that statically links it forms a combined
+work with it.
+
+Copyright holders are named in [AUTHORS](AUTHORS); every source file carries
+an SPDX header. Licences of the libraries linked into the shipped DLL are
+reproduced in [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 
 Portions are ported from [Modex](https://github.com/patchulidev/ModExplorerMenu)
 (patchulidev, GPL-3.0): the IMenu bootstrap, the ImGui render-loop structure,

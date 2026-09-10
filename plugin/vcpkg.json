@@ -1,6 +1,17 @@
 {
   "name": "grid-inventory",
   "version-string": "1.0.0",
+  "$comment": [
+    "Les versions sont EPINGLEES, et ce n'est pas du confort : la GPL exige que",
+    "la source publiee permette de reconstruire le binaire distribue. Sans",
+    "builtin-baseline ni overrides, chaque paquet flottait avec le clone vcpkg",
+    "de celui qui compile, et un tiers obtenait une autre DLL que la notre.",
+    "Les versions ci-dessous sont celles reellement liees dans la DLL livree",
+    "(relevees dans build/vcpkg-manifest-install.log).",
+    "Le triplet x64-windows-static est impose par CMakePresets.json : le projet",
+    "force la CRT statique, et un triplet /MD casse l'edition de liens."
+  ],
+  "builtin-baseline": "127402f1c75bb3d5ff6bce04b285faa4930a5aca",
   "dependencies": [
     "spdlog",
     "fmt",
@@ -10,5 +21,13 @@
       "name": "imgui",
       "features": ["dx11-binding", "win32-binding"]
     }
+  ],
+  "overrides": [
+    { "name": "imgui", "version": "1.92.8", "port-version": 1 },
+    { "name": "spdlog", "version": "1.17.0", "port-version": 1 },
+    { "name": "fmt", "version": "12.2.0", "port-version": 1 },
+    { "name": "rapidcsv", "version": "8.99" },
+    { "name": "directxtk", "version-date": "2026-05-07", "port-version": 1 },
+    { "name": "directxmath", "version-date": "2026-06-12" }
   ]
 }

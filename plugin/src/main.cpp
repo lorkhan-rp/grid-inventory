@@ -1,4 +1,9 @@
-﻿#include "api/HostApi.h"
+﻿// SPDX-License-Identifier: GPL-3.0-or-later
+// SPDX-FileCopyrightText: 2026 Smooth <skypia0147-dev@users.noreply.github.com>
+// SPDX-FileCopyrightText: 2026 Lorkhan RP
+// Additional permissions under GPL-3.0 section 7 apply - see EXCEPTIONS.txt.
+
+#include "api/HostApi.h"
 #include "game/BagFilter.h"
 #include "game/Census.h"
 #include "game/Costume.h"
@@ -2326,13 +2331,20 @@ namespace
 SKSEPluginInfo(
     .Version              = { 1, 4, 3, 0 },
     .Name                 = "GridInventory",
-    .Author               = "Smooth",
+    .Author               = "Smooth (modified: Lorkhan RP fork)",
     .RuntimeCompatibility = SKSE::VersionIndependence::AddressLibrary)
 
 SKSEPluginLoad(const SKSE::LoadInterface* a_skse)
 {
     InitializeLog();
     SKSE::Init(a_skse);
+    // GPL-3.0 section 5(a) : dire que ce binaire est une version MODIFIEE,
+    // et de quoi. Section 6(d) : offrir la source la ou le binaire arrive.
+    // Le journal est le seul endroit qu'un joueur de greffon SKSE regarde.
+    SKSE::log::info(
+        "GridInventory - fork Lorkhan RP, modifie depuis Grid Inventory de Smooth "
+        "(https://github.com/skypia0147-dev/grid-inventory). GPL-3.0-or-later, "
+        "source complete : https://github.com/lorkhan-rp/grid-inventory");
     // ★Say so in the log itself. A diagnostic build is otherwise
     // indistinguishable from the release one, and a report is worth much less
     // when nobody can tell which binary produced it.

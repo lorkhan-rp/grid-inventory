@@ -1,0 +1,25 @@
+{
+  "version": 3,
+  "cmakeMinimumRequired": { "major": 3, "minor": 21, "patch": 0 },
+  "configurePresets": [
+    {
+      "name": "release",
+      "displayName": "Release (x64-windows-static)",
+      "description": "La recette de release. Le triplet static est OBLIGATOIRE : CMakeLists.txt force la CRT statique (CMAKE_MSVC_RUNTIME_LIBRARY MultiThreaded), et un triplet /MD par defaut casse l'edition de liens d'imgui. Il n'existait jusqu'ici qu'en prose dans le README, ce qui rendait la source publiee non reconstructible.",
+      "generator": "Visual Studio 17 2022",
+      "architecture": "x64",
+      "binaryDir": "${sourceDir}/build",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "VCPKG_TARGET_TRIPLET": "x64-windows-static",
+        "VCPKG_MANIFEST_MODE": "ON",
+        "CMAKE_TOOLCHAIN_FILE": "$env{VCPKG_ROOT}/scripts/buildsystems/vcpkg.cmake",
+        "COMMONLIB_PREBUILT": "OFF",
+        "MOD_ROOT": ""
+      }
+    }
+  ],
+  "buildPresets": [
+    { "name": "release", "configurePreset": "release", "configuration": "Release" }
+  ]
+}
